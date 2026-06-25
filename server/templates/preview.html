@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>墨水屏预览 - 调试工具</title>
+<style>
+  :root {
+    --paper: #f4f1ea;
+    --paper-dark: #d8d4c8;
+    --bezel: #2a2a2a;
+    --bezel-light: #555;
+    --desk: #3b3f44;
+    --text: #e6e6e6;
+    --text-dim: #999;
+    --accent: #4fc3f7;
+    --accent2: #81c784;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: radial-gradient(circle at 30% 20%, #4a4f55 0%, #2c3036 100%);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 12px 40px;
+  }
+
+  h1 { font-size: 17px; font-weight: 500; margin-bottom: 3px; }
+  .subtitle { color: var(--text-dim); font-size: 12px; margin-bottom: 18px; }
+
+  /* ===== 标签切换 ===== */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 14px;
+    background: rgba(0,0,0,0.3);
+    padding: 4px;
+    border-radius: 8px;
+  }
+  .tab {
+    padding: 6px 14px;
+    border-radius: 5px;
+    font-size: 13px;
+    cursor: pointer;
+    background: transparent;
+    color: var(--text-dim);
+    border: none;
+    transition: background 0.15s, color 0.15s;
+  }
+  .tab:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+  .tab.active { background: #4a4f55; color: #fff; }
+
+  /* ===== 设备框 ===== */
+  .device {
+    width: 440px;
+    background: var(--bezel);
+    border-radius: 10px;
+    padding: 18px 18px 14px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5), inset 0 1px 0 var(--bezel-light);
+    position: relative;
+  }
+  .device::before {
+    content: "WAVESHARE 4.2\" e-Paper";
+    position: absolute;
+    top: 4px; left: 0; right: 0;
+    text-align: center;
+    font-size: 9px;
+    color: #777;
+    letter-spacing: 1px;
+  }
+
+  .screen-wrap {
+    width: 400px;
+    height: 300px;
+    background: var(--paper);
+    border-radius: 2px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: inset 0 0 0 1px #000;
+    transition: transform 0.2s;
+  }
+  .screen-wrap canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+  }
+  .screen-wrap img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+  }
+  .screen-wrap::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(0,0,0,0.025) 3px 4px);
+    pointer-events: none;
+    mix-blend-mode: multiply;
+  }
+
+  /* ===== 像素网格视图 ===== */
+  .pixel-grid {
+    display: none;
+    width: 400px;
+    height: 300px;
+    overflow: auto;
+    background: #fff;
+    cursor: crosshair;
+  }
+  .pixel-grid.active { display: block; }
+  .pixel-grid canvas {
+    image-rendering: pixelated;
+  }
+  .pixel-wrap { position: relative; }
+  .pixel-wrap canvas { display: block; }
+
+  /* 缩放：1.5x */
+  .scale-1_5 .screen-wrap,
+  .scale-1_5 .pixel-grid { transform: scale(1.5); transform-origin: top left; }
+
+  /* ===== 控制栏 ===== */
+  .controls {
+    margin-top: 14px;
+    display: flex;
+    gap: 6px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  button {
+    background: #4a4f55;
+    color: var(--text);
+    border: 1px solid #666;
+    padding: 6px 12px;
+    border-radius: 5px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: #5a6066; }
+  button:active { background: var(--accent); color: #000; }
+  button.active { background: var(--accent); color: #000; border-color: var(--accent); }
+
+  /* ===== 布局标注（覆盖在屏幕上）====== */
+  .zone-labels {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    font-size: 9px;
+    color: rgba(0,0,200,0.6);
+    font-family: monospace;
+  }
+  .zone-label {
+    position: absolute;
+    left: 2px;
+    background: rgba(200,220,255,0.7);
+    padding: 0 2px;
+    white-space: nowrap;
+  }
+
+  /* ===== 状态栏 ===== */
+  .status {
+    margin-top: 12px;
+    width: 440px;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 11px;
+    font-family: "Consolas", "Monaco", monospace;
+    color: var(--text-dim);
+    line-height: 1.7;
+  }
+  .status .k { color: var(--accent); }
+  .status .v { color: var(--text); }
+  .status .ok { color: var(--accent2); }
+  .status .err { color: #ef5350; }
+
+  /* ===== 闪烁动画 ===== */
+  @keyframes flash {
+    0%,100% { opacity: 1; }
+    25%,75% { opacity: 0.3; }
+    50% { opacity: 1; }
+  }
+  .screen-wrap.flashing { animation: flash 0.4s ease; }
+
+  /* ===== 布局调试面板 ===== */
+  .debug-panel {
+    margin-top: 12px;
+    width: 440px;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 11px;
+    display: none;
+  }
+  .debug-panel.visible { display: block; }
+  .debug-panel h3 {
+    font-size: 12px;
+    color: var(--accent);
+    margin-bottom: 6px;
+    font-family: inherit;
+  }
+  .debug-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    color: var(--text-dim);
+  }
+  .debug-row span { color: var(--text); }
+
+  @media (max-width: 480px) {
+    .device, .status, .debug-panel { width: 100%; max-width: 400px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>📟 墨水屏预览</h1>
+<div class="subtitle">4.2 inch V2 · 400×300 1-bit · 2x超采样+阈值二值化</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="setMode('normal')">👁 预览</button>
+  <button class="tab" onclick="setMode('compare')">🔍 对比</button>
+  <button class="tab" onclick="setMode('pixel')">🔬 像素</button>
+  <button class="tab" onclick="setMode('debug')">📐 布局</button>
+</div>
+
+<div class="device" id="device">
+  <div class="screen-wrap" id="screen-wrap">
+    <img id="screen" src="/api/screen.png?_=init" alt="e-ink">
+  </div>
+  <div class="pixel-grid" id="pixel-grid">
+    <div class="pixel-wrap">
+      <canvas id="pixel-canvas" width="400" height="300"></canvas>
+    </div>
+  </div>
+  <div class="zone-labels" id="zone-labels" style="display:none"></div>
+  <!-- 对比视图：三栏并排 1:1原始 vs 2x高清 vs 1-bit -->
+  <div id="compare-wrap" style="display:none; position:relative;">
+    <div style="display:flex; gap:4px; align-items:flex-start;">
+      <div style="flex:1;">
+        <div style="font-size:9px; color:#888; text-align:center; margin-bottom:2px;">1:1 原始 (400×300)</div>
+        <img id="img-raw" src="/api/screen_raw.png" style="width:400px; height:300px; image-rendering:auto; background:#fff; border:1px solid #333;">
+      </div>
+      <div style="flex:1;">
+        <div style="font-size:9px; color:#888; text-align:center; margin-bottom:2px;">2x 高清 (800×600→缩放)</div>
+        <img id="img-2x" src="/api/screen_2x.png" style="width:400px; height:300px; image-rendering:auto; background:#fff; border:1px solid #333;">
+      </div>
+      <div style="flex:1;">
+        <div style="font-size:9px; color:#888; text-align:center; margin-bottom:2px;">1-bit 墨水屏</div>
+        <img id="img-epd" src="/api/screen.png" style="width:400px; height:300px; image-rendering:pixelated; background:#fff; border:1px solid #333;">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="controls">
+  <button onclick="refreshNow(true)">🔄 刷新</button>
+  <button onclick="toggleAuto()" id="btn-auto">⏸ 暂停</button>
+  <button onclick="toggleZoom()" id="btn-zoom">🔍 1.5×</button>
+  <a href="/api/screen.png" download="screen_epd.png"><button>💾 墨水屏 PNG</button></a>
+  <a href="/api/screen_raw.png" download="screen_raw.png"><button>💾 原始图</button></a>
+  <a href="/api/info" target="_blank"><button>📊 JSON</button></a>
+  <button onclick="toggleDebug()">📐 布局</button>
+</div>
+
+<div class="status" id="status">
+  <div><span class="k">分辨率</span> <span class="v">400 × 300</span>
+       <span class="k" style="margin-left:16px">色深</span> <span class="v">1-bit</span>
+       <span class="k" style="margin-left:16px">渲染</span> <span class="v">2x超采样→阈值</span></div>
+  <div><span class="k">上次</span> <span class="v" id="updated">--</span>
+       <span class="k" style="margin-left:16px">大小</span> <span class="v" id="size">--</span>
+       <span class="k" style="margin-left:16px">渲染</span> <span class="v" id="render-ms">--</span></div>
+  <div><span class="k">下次自动</span> <span class="v" id="next">--</span>
+       <span class="k" style="margin-left:16px">已刷新</span> <span class="v" id="count">0</span></div>
+</div>
+
+<div class="debug-panel" id="debug-panel">
+  <h3>📐 布局参数（来自 /api/debug/layout）</h3>
+  <div class="debug-row" id="debug-rows">加载中...</div>
+</div>
+
+<script>
+  // ========== 状态 ==========
+  let count = 0;
+  let autoEnabled = true;
+  let zoomed = false;
+  let blobUrl = null;
+  let pixelOn = false;
+  let debugOn = false;
+  let nextAt = null;
+  let timer = null;
+  let lastPngUrl = null;
+
+  // ========== 像素网格绘制 ==========
+  const pixelCanvas = document.getElementById('pixel-canvas');
+  const pixelCtx = pixelCanvas.getContext('2d');
+
+  function drawPixelGrid(blob) {
+    const img = new Image();
+    img.onload = () => {
+      // 把 PNG 画到离屏 canvas
+      const offscreen = document.createElement('canvas');
+      offscreen.width = 400;
+      offscreen.height = 300;
+      const octx = offscreen.getContext('2d');
+      octx.drawImage(img, 0, 0);
+
+      // 放大 10 倍到 pixelCanvas
+      const scale = 4;
+      pixelCanvas.width = 400 * scale;
+      pixelCanvas.height = 300 * scale;
+      pixelCtx.imageSmoothingEnabled = false;
+      pixelCtx.drawImage(offscreen, 0, 0, 400 * scale, 300 * scale);
+    };
+    img.src = blobUrl;
+  }
+
+  // ========== 模式切换 ==========
+  function setMode(mode) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    event.target.classList.add('active');
+
+    const wrap = document.getElementById('screen-wrap');
+    const grid = document.getElementById('pixel-grid');
+    const labels = document.getElementById('zone-labels');
+    const compare = document.getElementById('compare-wrap');
+
+    wrap.style.display = 'none';
+    grid.classList.remove('active');
+    labels.style.display = 'none';
+    compare.style.display = 'none';
+    pixelOn = false;
+
+    if (mode === 'normal') {
+      wrap.style.display = 'block';
+    } else if (mode === 'pixel') {
+      grid.classList.add('active');
+      pixelOn = true;
+      if (blobUrl) drawPixelGrid();
+    } else if (mode === 'compare') {
+      compare.style.display = 'block';
+      // 对比模式下刷新所有图
+      document.getElementById('img-raw').src = '/api/screen_raw.png?_=' + Date.now();
+      document.getElementById('img-2x').src = '/api/screen_2x.png?_=' + Date.now();
+      document.getElementById('img-epd').src = '/api/screen.png?_=' + Date.now();
+    } else if (mode === 'debug') {
+      wrap.style.display = 'block';
+      labels.style.display = 'block';
+      fetchLayout();
+    }
+  }
+
+  // ========== 加载布局标注 ==========
+  async function fetchLayout() {
+    try {
+      const resp = await fetch('/api/debug/layout');
+      const layout = await resp.json();
+      const container = document.getElementById('zone-labels');
+      container.innerHTML = '';
+
+      const zones = layout.zones;
+      for (const [name, info] of Object.entries(zones)) {
+        const div = document.createElement('div');
+        div.className = 'zone-label';
+        div.textContent = `${name} y=${info.y} h=${info.h}`;
+        div.style.top = (info.y - 12) + 'px';
+        container.appendChild(div);
+      }
+      // 分隔线
+      const dividers = layout.dividers;
+      for (const [name, y] of Object.entries(dividers)) {
+        const div = document.createElement('div');
+        div.className = 'zone-label';
+        div.textContent = `── ${name} y=${y}`;
+        div.style.top = (y - 6) + 'px';
+        div.style.background = 'rgba(255,200,200,0.7)';
+        container.appendChild(div);
+      }
+
+      // debug panel
+      document.getElementById('debug-rows').innerHTML =
+        Object.entries(layout.data_source).map(([k,v]) =>
+          `<div><span class="k">${k}</span>=<span>${String(v)}</span></div>`).join('');
+    } catch(e) {
+      document.getElementById('debug-rows').textContent = '加载失败: ' + e.message;
+    }
+  }
+
+  // ========== 刷新 ==========
+  async function refreshNow(flash) {
+    const wrap = document.getElementById('screen-wrap');
+    const img = document.getElementById('screen');
+    if (flash) wrap.classList.add('flashing');
+
+    const t0 = performance.now();
+    try {
+      const resp = await fetch('/api/screen.png?_=' + Date.now(), { cache: 'no-store' });
+      const blob = await resp.blob();
+      const dt = Math.round(performance.now() - t0);
+
+      // 替换 img src
+      if (lastPngUrl) URL.revokeObjectURL(lastPngUrl);
+      lastPngUrl = URL.createObjectURL(blob);
+      img.src = lastPngUrl;
+
+      // 像素网格也更新
+      if (pixelOn) {
+        if (blobUrl) URL.revokeObjectURL(blobUrl);
+        blobUrl = URL.createObjectURL(blob);
+        drawPixelGrid();
+      }
+
+      // 对比视图：同时刷新所有图
+      const compareEl = document.getElementById('compare-wrap');
+      if (compareEl && compareEl.style.display !== 'none') {
+        document.getElementById('img-raw').src = '/api/screen_raw.png?_=' + Date.now();
+        document.getElementById('img-2x').src = '/api/screen_2x.png?_=' + Date.now();
+        document.getElementById('img-epd').src = '/api/screen.png?_=' + Date.now();
+      }
+
+      count++;
+      document.getElementById('updated').textContent = new Date().toLocaleTimeString('zh-CN');
+      document.getElementById('size').textContent = (blob.size / 1024).toFixed(1) + ' KB';
+      document.getElementById('render-ms').textContent = dt + 'ms';
+      document.getElementById('count').textContent = count;
+      nextAt = new Date(Date.now() + 60000);
+    } catch(e) {
+      const updatedEl = document.getElementById('updated');
+      updatedEl.textContent = '失败: ' + e.message;
+      updatedEl.className = 'err';
+    }
+
+    if (flash) setTimeout(() => wrap.classList.remove('flashing'), 420);
+  }
+
+  // ========== 自动刷新 ==========
+  function scheduleNext() {
+    if (timer) clearTimeout(timer);
+    if (!autoEnabled) return;
+    timer = setTimeout(() => { refreshNow(true); scheduleNext(); }, 60000);
+  }
+
+  // ========== 控制 ==========
+  function toggleAuto() {
+    autoEnabled = !autoEnabled;
+    const btn = document.getElementById('btn-auto');
+    btn.textContent = autoEnabled ? '⏸ 暂停' : '▶ 恢复';
+    if (!autoEnabled) {
+      clearTimeout(timer);
+      document.getElementById('next').textContent = '已暂停';
+    } else {
+      scheduleNext();
+    }
+  }
+
+  function toggleZoom() {
+    document.getElementById('device').classList.toggle('scale-1_5');
+    zoomed = !zoomed;
+    const btn = document.getElementById('btn-zoom');
+    btn.textContent = zoomed ? '🔍 1×' : '🔍 1.5×';
+  }
+
+  function toggleDebug() {
+    debugOn = !debugOn;
+    document.getElementById('debug-panel').classList.toggle('visible', debugOn);
+    if (debugOn) fetchLayout();
+  }
+
+  // 倒计时
+  setInterval(() => {
+    if (!autoEnabled || !nextAt) return;
+    const left = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
+    document.getElementById('next').textContent = left + ' 秒';
+  }, 1000);
+
+  // 切 tab 时保持
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && autoEnabled) {
+      refreshNow(false);
+      scheduleNext();
+    }
+  });
+
+  // 初始化
+  refreshNow(true);
+  scheduleNext();
+  fetchLayout();
+</script>
+
+</body>
+</html>
