@@ -16,10 +16,113 @@ import os
 import sys
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    import freetype
+    HAVE_FREETYPE = True
+except ImportError:
+    HAVE_FREETYPE = False
+
 
 W, H = 400, 300
 WHITE = 255
 BLACK = 0
+
+
+# ============================================================
+# 全局 mono 文本渲染（用 FreeType FT_LOAD_TARGET_MONO，无抗锯齿）
+# ============================================================
+def mono_text(img, xy, text, font, fill=BLACK):
+    """用 FreeType mono 模式在 1-bit 图像上画文字（替代 draw.text）"""
+    if not HAVE_FREETYPE:
+        ImageDraw.Draw(img).text(xy, text, font=font, fill=fill)
+        return
+    try:
+        size_px = font.size
+        path = font.path
+        m = get_mono(path, size_px)
+        m.draw_text(img, xy, text, fill=fill)
+    except Exception:
+        ImageDraw.Draw(img).text(xy, text, font=font, fill=fill)
+
+
+# Monkey-patch ImageDraw.Draw.text 使用 mono 渲染（笔画绝对等粗）
+_original_text = ImageDraw.ImageDraw.text
+
+def _patched_text(self, xy, text, fill=None, font=None, anchor=None, spacing=4, align="left", direction=None, features=None, language=None, stroke_width=0, stroke_fill=None, embedded_color=False):
+    """用 mono 模式替代默认 draw.text"""
+    if font is not None and HAVE_FREETYPE and hasattr(font, 'size') and hasattr(font, 'path'):
+        try:
+            m = get_mono(font.path, font.size)
+            x, y = xy[0], xy[1]
+            # 简化的 baseline 处理：原 draw.text 用左上角，mono_text 也用
+            m.draw_text(self.im, (x, y), text, fill=fill if fill is not None else BLACK)
+            return
+        except Exception:
+            pass
+    return _original_text(self, xy, text, fill=fill, font=font, anchor=anchor,
+                         spacing=spacing, align=align, direction=direction,
+                         features=features, language=language,
+                         stroke_width=stroke_width, stroke_fill=stroke_fill,
+                         embedded_color=embedded_color)
+
+ImageDraw.ImageDraw.text = _patched_text
+
+
+# ============================================================
+# FreeType 单色位图渲染（无抗锯齿，笔画绝对等粗）
+# ============================================================
+class MonoTextRenderer:
+    """用 FreeType FT_LOAD_TARGET_MONO 渲染文本，无抗锯齿"""
+    def __init__(self, font_path, size_px):
+        self.face = freetype.Face(font_path)
+        # size in 1/64 points
+        self.face.set_char_size(size_px * 64)
+        self.size_px = size_px
+        self.ascent = self.face.size.ascender // 64
+        self.descent = -self.face.size.descender // 64
+
+    def text_size(self, text):
+        """返回 (width, height)"""
+        w = 0
+        for ch in text:
+            self.face.load_char(ch, freetype.FT_LOAD_TARGET_MONO)
+            w += self.face.glyph.advance.x // 64
+        return w, self.ascent + self.descent
+
+    def draw_text(self, img, xy, text, fill=BLACK):
+        """在 1-bit 图像上画文本"""
+        x, y_baseline = xy
+        for ch in text:
+            self.face.load_char(ch, freetype.FT_LOAD_RENDER | freetype.FT_LOAD_TARGET_MONO)
+            bitmap = self.face.glyph.bitmap
+            w, h = bitmap.width, bitmap.rows
+            if w > 0 and h > 0:
+                # 解包 1-bit packed buffer
+                row_bytes = (w + 7) // 8
+                buf = bytes(bitmap.buffer)
+                # paste each pixel
+                bx = self.face.glyph.bitmap_left
+                by = y_baseline - self.face.glyph.bitmap_top
+                for row in range(h):
+                    for col in range(w):
+                        byte_idx = row * row_bytes + (col // 8)
+                        bit_mask = 0x80 >> (col % 8)
+                        if byte_idx < len(buf) and (buf[byte_idx] & bit_mask):
+                            px = bx + col
+                            py = by + row
+                            if 0 <= px < img.width and 0 <= py < img.height:
+                                img.putpixel((px, py), fill)
+            x += self.face.glyph.advance.x // 64
+
+
+# 缓存 MonoTextRenderer 实例
+_mono_cache = {}
+
+def get_mono(font_path, size_px):
+    key = (font_path, size_px)
+    if key not in _mono_cache:
+        _mono_cache[key] = MonoTextRenderer(font_path, size_px)
+    return _mono_cache[key]
 
 
 # ============================================================
@@ -29,12 +132,21 @@ BLACK = 0
 def _find_font_paths():
     """找字体路径（不创建字体实例）"""
     ch_paths = [
+        # 文泉驿正黑（等粗笔画，高分辨率显示效果好）
+        ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", "文泉驿正黑"),
         # 思源黑体
         ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "思源黑体 Regular"),
         (r"C:\Windows\Fonts\NotoSansSC-VF.ttf",      "思源黑体"),
         # 微软雅黑粗体
         ("/home/bullton/apps/clock/msyhbd.ttc",     "微软雅黑粗"),
         (r"C:\Windows\Fonts\msyhbd.ttc",             "微软雅黑粗"),
+    ]
+    ch_bold_paths = [
+        ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", "文泉驿正黑"),
+        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",   "思源黑体 Bold"),
+        (r"C:\Windows\Fonts\NotoSansSC-VF.ttf",   "思源黑体"),
+        ("/home/bullton/apps/clock/msyhbd.ttc",     "微软雅黑粗"),
+        (r"C:\Windows\Fonts\msyhbd.ttc",           "微软雅黑粗"),
     ]
     emoji_paths = [
         r"C:\Windows\Fonts\seguiemj.ttf",
@@ -65,7 +177,14 @@ def _find_font_paths():
             time_path = p
             break
 
-    return ch_path, emoji_path, time_path
+    ch_bold_path = None
+    for p, name in ch_bold_paths:
+        if os.path.exists(p):
+            ch_bold_path = p
+            print(f"    中文字体粗体: {name} ({os.path.basename(p)})")
+            break
+
+    return ch_path, emoji_path, time_path, ch_bold_path
 
 
 _font_paths = None
@@ -76,21 +195,26 @@ def load_fonts():
     if _font_paths is None:
         _font_paths = _find_font_paths()
 
-    ch_path, emoji_path, time_path = _font_paths
+    ch_path, emoji_path, time_path, ch_bold_path = _font_paths
 
     if ch_path is None:
         default = ImageFont.load_default()
-        return {k: default for k in "time title body small tiny icon icon_big wi wi_big".split()}
+        return {k: default for k in "time title title_bold body small weather tiny date tab icon icon_big wi wi_big".split()}
 
     wi_path = os.path.join(os.path.dirname(__file__), "weathericons-regular-webfont.ttf")
     time_font_path = time_path if time_path else (r"C:\Windows\Fonts\ariblk.ttf" if os.path.exists(r"C:\Windows\Fonts\ariblk.ttf") else ch_path)
+    bold_path = ch_bold_path if ch_bold_path else ch_path
 
     return {
         "time":     ImageFont.truetype(time_font_path, 56),
         "title":    ImageFont.truetype(ch_path, 20),
+        "title_bold": ImageFont.truetype(bold_path, 20),
         "body":     ImageFont.truetype(ch_path, 18),
         "small":    ImageFont.truetype(ch_path, 16),
-        "tiny":     ImageFont.truetype(ch_path, 14),
+        "weather":  ImageFont.truetype(ch_path, 12),
+        "tiny":     ImageFont.truetype(ch_path, 10),
+        "date":     ImageFont.truetype(ch_path, 12),
+        "tab":      ImageFont.truetype(ch_path, 12),
         "icon":     ImageFont.truetype(emoji_path, 20) if emoji_path else ImageFont.truetype(ch_path, 20),
         "icon_big": ImageFont.truetype(emoji_path, 32) if emoji_path else ImageFont.truetype(ch_path, 32),
         "wi":       ImageFont.truetype(wi_path, 20) if os.path.exists(wi_path) else None,
@@ -104,21 +228,26 @@ def load_fonts_2x():
     if _font_paths is None:
         _font_paths = _find_font_paths()
 
-    ch_path, emoji_path, time_path = _font_paths
+    ch_path, emoji_path, time_path, ch_bold_path = _font_paths
 
     if ch_path is None:
         default = ImageFont.load_default()
-        return {k: default for k in "time title body small tiny icon icon_big wi wi_big".split()}
+        return {k: default for k in "time title title_bold body small weather tiny date tab icon icon_big wi wi_big".split()}
 
     wi_path = os.path.join(os.path.dirname(__file__), "weathericons-regular-webfont.ttf")
     time_font_path = time_path if time_path else (r"C:\Windows\Fonts\ariblk.ttf" if os.path.exists(r"C:\Windows\Fonts\ariblk.ttf") else ch_path)
+    bold_path = ch_bold_path if ch_bold_path else ch_path
 
     return {
         "time":     ImageFont.truetype(time_font_path, 112),
         "title":    ImageFont.truetype(ch_path, 40),
+        "title_bold": ImageFont.truetype(bold_path, 40),
         "body":     ImageFont.truetype(ch_path, 36),
         "small":    ImageFont.truetype(ch_path, 32),
-        "tiny":     ImageFont.truetype(ch_path, 28),
+        "weather":  ImageFont.truetype(ch_path, 24),
+        "tiny":     ImageFont.truetype(ch_path, 20),
+        "date":     ImageFont.truetype(ch_path, 24),
+        "tab":      ImageFont.truetype(ch_path, 24),
         "icon":     ImageFont.truetype(emoji_path, 40) if emoji_path else ImageFont.truetype(ch_path, 40),
         "icon_big": ImageFont.truetype(emoji_path, 64) if emoji_path else ImageFont.truetype(ch_path, 64),
         "wi":       ImageFont.truetype(wi_path, 40) if os.path.exists(wi_path) else None,
@@ -197,6 +326,24 @@ def _draw_fog(draw, cx, cy, r, fill):
             y1 = y + (r//4 if (x0//(r//2)) % 2 == 0 else -r//4)
             draw.line([(x0, y), (x1, y1)], fill=fill, width=max(1, r//4))
 
+def _draw_wind_arrow(draw, cx, cy, size, deg, fill):
+    """画风向箭头 (cx,cy) 为中心, deg为风向角度(北为0,顺时针)
+       size: 箭头总大小"""
+    import math
+    r = size // 2
+    rad = math.radians(deg - 90)
+    x2 = cx + int(round(r * 0.7 * math.cos(rad)))
+    y2 = cy + int(round(r * 0.7 * math.sin(rad)))
+    rad1 = math.radians(deg - 90 - 30)
+    rad2 = math.radians(deg - 90 + 30)
+    x3 = cx + int(round(r * 0.35 * math.cos(rad1)))
+    y3 = cy + int(round(r * 0.35 * math.sin(rad1)))
+    x4 = cx + int(round(r * 0.35 * math.cos(rad2)))
+    y4 = cy + int(round(r * 0.35 * math.sin(rad2)))
+    draw.line([(cx, cy), (x2, y2)], fill=fill, width=max(1, size//6))
+    draw.line([(x2, y2), (x3, y3)], fill=fill, width=max(1, size//6))
+    draw.line([(x2, y2), (x4, y4)], fill=fill, width=max(1, size//6))
+
 def draw_weather_icon(draw, cond, cx, cy, size, fill):
     """根据天气状况在 (cx, cy) 居中画图标"""
     r = size // 2
@@ -228,18 +375,18 @@ class Layout:
     DIV1_Y   = 32             # 分隔线1（Title底边）
 
     MAIN_TOP    = 36          # 主区域（时间+天气）顶部
-    MAIN_BOTTOM = 115         # 主区域底部（80px高）
+    MAIN_BOTTOM = 127         # 主区域底部（91px高，+12）
     TIME_X2     = 196         # 时间右边界
     WEATHER_X1  = 204         # 天气左边界
-    DIV2_Y      = 116         # 分隔线2（MAIN与FCST分隔）
+    DIV2_Y      = 128         # 分隔线2（MAIN与FCST分隔，+12）
 
-    FCST_Y      = 123         # 7日预报顶部
-    FCST_H      = 80          # 7日预报高度
-    FCST_BOTTOM = 202         # 7日预报底部
-    DIV3_Y      = 203         # 分隔线3（FCST与BOTTOM分隔）
-
-    BOTTOM_TOP  = 210         # 古诗区域顶部
+    FCST_Y      = 135         # 7日预报顶部（+12）
+    FCST_H      = 74           # 7日预报高度
+    FCST_BOTTOM = 206         # 7日预报底部（+12，上移8px）
+    DIV3_Y      = 216         # 分隔线3（FCST与BOTTOM分隔，与BOTTOM_TOP重合）
+    BOTTOM_TOP  = 212         # 古诗区域顶部（+12）
     BOTTOM_BOT  = 289         # 古诗区域底部（距底3px）
+    TAB_H       = 24          # 底部菜单tab高度（上移4px）
 
 
 # ============================================================
@@ -254,18 +401,18 @@ class Layout2x:
     DIV1_Y   = 64             # 分隔线1（Title底边，2x）
 
     MAIN_TOP    = 72          # 主区域（时间+天气）顶部
-    MAIN_BOTTOM = 230         # 主区域底部（2x of 115, 约160px高）
+    MAIN_BOTTOM = 254         # 主区域底部（+24 in 2x）
     TIME_X2     = 392         # 时间右边界
     WEATHER_X1  = 408         # 天气左边界
-    DIV2_Y      = 232         # 分隔线2（MAIN与FCST分隔，2x）
+    DIV2_Y      = 256         # 分隔线2（MAIN与FCST分隔，+24）
 
-    FCST_Y      = 246         # 7日预报顶部（2x of 123）
-    FCST_H      = 160         # 7日预报高度（2x of 80）
-    FCST_BOTTOM = 404         # 7日预报底部（2x of 202）
-    DIV3_Y      = 406         # 分隔线3（FCST与BOTTOM分隔，2x）
-
-    BOTTOM_TOP  = 420         # 古诗区域顶部（2x of 210）
+    FCST_Y      = 270         # 7日预报顶部（+24）
+    FCST_H      = 148         # 7日预报高度（2x of 74）
+    FCST_BOTTOM = 412         # 7日预报底部（+24，上移8px）
+    DIV3_Y      = 432         # 分隔线3（FCST与BOTTOM分隔，与BOTTOM_TOP重合）
+    BOTTOM_TOP  = 424         # 古诗区域顶部（+24）
     BOTTOM_BOT  = 578         # 古诗区域底部（2x of 289）
+    TAB_H       = 48          # 底部菜单tab高度（2x，上移4px）
 
 
 # ============================================================
@@ -307,18 +454,58 @@ class Renderer2x:
         now = data["now"]
         city = data["current"]["city"]
         f = self.fonts["small"]
+        f_tiny = self.fonts["tiny"]
         zone_center = (self.L.TOP_Y + self.L.DIV1_Y) // 2
         l, top, r, b = f.getbbox("Test")
         visual_h = b - top
         visual_center_offset = top + visual_h // 2
         y = zone_center - visual_center_offset
-        draw.text((self.L.M + 8, y), now["date_cn"], font=f, fill=BLACK)
+        date_x = self.L.M + 8
+        holiday = now.get("holiday", "")
+        # 始终用完整日期（含年份）
+        date_str = now["date_cn"]
+        draw.text((date_x, y), date_str, font=f, fill=BLACK)
+        # 假期名紧跟日期后（小字体）
+        holiday_end_x = date_x + self._text_size(date_str, f)[0]
+        if holiday:
+            date_tw, _ = self._text_size(date_str, f)
+            l2, top2, r2, b2 = f_tiny.getbbox(holiday)
+            visual_h2 = b2 - top2
+            visual_center_offset2 = top2 + visual_h2 // 2
+            y2 = zone_center - visual_center_offset2
+            draw.text((date_x + date_tw + 6, y2), holiday, font=f_tiny, fill=BLACK)
+            holiday_end_x = date_x + date_tw + 6 + self._text_size(holiday, f_tiny)[0]
+        # 星期放在日期/假期之后
         wd = now["weekday_cn"]
         tw, _ = self._text_size(wd, f)
-        draw.text(((self.L.W - tw) // 2, y), wd, font=f, fill=BLACK)
+        wd_x = holiday_end_x + 8
+        draw.text((wd_x, y), wd, font=f, fill=BLACK)
+        # 城市+WiFi 在最右
+        rssi = data.get("rssi")
         tw, _ = self._text_size(city, f)
-        draw.text((self.L.W - self.L.M - tw - 8, y), city, font=f, fill=BLACK)
+        right_edge = self.L.W - self.L.M - 8
+        city_x = right_edge - tw
+        wifi_w = self._draw_wifi_icon(draw, city_x - 4, y, rssi)
+        draw.text((city_x, y), city, font=f, fill=BLACK)
         self._hline(draw, self.L.DIV1_Y)
+
+    def _draw_wifi_icon(self, draw, x, y, rssi):
+        """在(x,y)位置画WiFi信号图标，x是右边界，y是文字基线，返回图标宽度"""
+        icon_w = 12
+        dot_r = 1
+        cx = x - icon_w // 2
+        dot_cy = y + 14
+        dot_cx = cx
+        draw.ellipse([dot_cx - dot_r, dot_cy - dot_r, dot_cx + dot_r, dot_cy + dot_r], fill=BLACK)
+        arcs = 3 if rssi is None or rssi >= -50 else (2 if rssi >= -70 else 1)
+        radii = [2, 4, 6]
+        for i in range(arcs):
+            r = radii[i]
+            top = dot_cy - r * 2
+            left = dot_cx - r
+            right = dot_cx + r
+            draw.arc([left, top, right, top + r * 2], 180, 360, fill=BLACK, width=1)
+        return icon_w
 
     def _draw_time(self, draw, data):
         t = data["now"]["time_str"]
@@ -341,81 +528,102 @@ class Renderer2x:
     def _draw_current_weather(self, draw, data):
         cw = data["current"]
         f_wi_big = self.fonts["wi_big"]
-        f_small = self.fonts["small"]
+        f_w = self.fonts["weather"]
 
         zone_top = self.L.MAIN_TOP
         zone_bot = self.L.MAIN_BOTTOM
-        zone_h = zone_bot - zone_top
 
-        env_temp = cw.get("env_temp")
-        if env_temp is not None:
-            temp_str = f'{cw["temp"]}°C / {env_temp:.1f}°C'
-        else:
-            temp_str = f'{cw["temp"]}°C'
+        env_temp = cw.get("env_temp") or cw.get("temp", 25.0)
+        feels_like = cw.get("feels_like", cw["temp"])
         cond_str = cw["cond_cn"]
+        wind_str = cw.get("wind", "")
         pressure_str = f'{cw["pressure"]}hPa'
+        humidity_str = f'{cw.get("humidity", 0)}%'
 
-        tw, th = self._text_size(temp_str, f_small)
-        cw_w, cw_h = self._text_size(cond_str, f_small)
-        pw, ph = self._text_size(pressure_str, f_small)
+        l, bbox_top, r, b = ImageDraw.Draw(Image.new("1", (1, 1))).textbbox((0, 0), "温", font=f_w)
+        margin = 4
+        row_gap = 2
+        row1_y = zone_top + margin - bbox_top
 
-        l, bbox_top, r, b = ImageDraw.Draw(Image.new("1", (1, 1))).textbbox((0, 0), "温", font=f_small)
+        row1_str = f'实时温度：{env_temp:.1f}°'
+        row2_str = f'体感温度：{feels_like}°'
+        row3_str = f'实时天气：{cond_str}'
+        row4_str = f'风向风力：{wind_str}'
+        row5_str = f'气压湿度：{pressure_str} / {humidity_str}'
+
+        _, h1 = self._text_size(row1_str, f_w)
+        row2_y = row1_y + h1 + row_gap
+        _, h2 = self._text_size(row2_str, f_w)
+        row3_y = row2_y + h2 + row_gap
+        _, h3 = self._text_size(row3_str, f_w)
+        row4_y = row3_y + h3 + row_gap
+        _, h4 = self._text_size(row4_str, f_w)
+        row5_y = row4_y + h4 + row_gap
+        _, h5 = self._text_size(row5_str, f_w)
+
         col_x1 = self.L.WEATHER_X1 + 8
         col_x2 = self.L.W - self.L.M - 8
         col_w = col_x2 - col_x1
 
-        icon_col_w = col_w // 3
-        text_col_x1 = col_x1 + icon_col_w
+        text_col_x2 = col_x2 - col_w // 3 - 8
+
+        three_rows_top = row1_y
+        three_rows_bot = row3_y + h3
+        three_rows_h = three_rows_bot - three_rows_top
+        icon_cy = (three_rows_top + three_rows_bot) // 2
 
         icon_char = chr(WI_MAP.get(cw["cond"], 0xF00D))
         icon_bbox = f_wi_big.getbbox(icon_char)
         icon_w = icon_bbox[2] - icon_bbox[0]
         icon_h = icon_bbox[3] - icon_bbox[1]
-
-        icon_cx = col_x1 + icon_col_w // 2
-        icon_cy = (zone_top + zone_bot) // 2
-        y_icon = icon_cy - icon_h // 2 - icon_bbox[1] + 1
+        icon_cx = (text_col_x2 + col_x2) // 2
+        y_icon = icon_cy - icon_h // 2 - icon_bbox[1]
         draw.text((icon_cx - icon_w // 2, y_icon), icon_char, font=f_wi_big, fill=BLACK)
 
-        margin = 8
-        row_gap = 8
-        row1_y = zone_top + margin - bbox_top
-        row2_y = row1_y + th + row_gap
-        row3_y = row2_y + cw_h + row_gap
-
-        text_col_center_x = text_col_x1 + (col_x2 - text_col_x1) // 2
-        text_x = text_col_center_x - tw // 2
-
-        draw.text((text_x, row1_y), temp_str, font=f_small, fill=BLACK)
-        draw.text((text_x, row2_y), cond_str, font=f_small, fill=BLACK)
-        draw.text((text_x, row3_y), pressure_str, font=f_small, fill=BLACK)
+        draw.text((col_x1, row1_y), row1_str, font=f_w, fill=BLACK)
+        draw.text((col_x1, row2_y), row2_str, font=f_w, fill=BLACK)
+        draw.text((col_x1, row3_y), row3_str, font=f_w, fill=BLACK)
+        draw.text((col_x1, row4_y), row4_str, font=f_w, fill=BLACK)
+        draw.text((col_x1, row5_y), row5_str, font=f_w, fill=BLACK)
 
     def _draw_weekly_forecast(self, draw, data):
         weekly = data["weekly"]
         col_w = (self.L.W - 2 * self.L.M) // 7
         x_start = self.L.M
         f_tiny = self.fonts["tiny"]
+        f_date = self.fonts["date"]
         f_wi = self.fonts["wi"]
+
+        if f_wi:
+            max_wi_h = 0
+            for day in weekly:
+                code = WI_MAP.get(day["cond"], 0xF00D)
+                icon_char = chr(code)
+                wi_bbox = f_wi.getbbox(icon_char)
+                wi_h = wi_bbox[3] - wi_bbox[1]
+                max_wi_h = max(max_wi_h, wi_h)
+
+        _, base_lh = self._text_size("今日", f_date)
+        label_y = self.L.FCST_Y
 
         for i, day in enumerate(weekly):
             cx = x_start + i * col_w + col_w // 2
 
             lbl = day["date_str"]
-            lw, lh = self._text_size(lbl, f_tiny)
-            label_y = self.L.FCST_Y
-            draw.text((cx - lw // 2, label_y), lbl, font=f_tiny, fill=BLACK)
+            lw, lh = self._text_size(lbl, f_date)
+            draw.text((cx - lw // 2, label_y), lbl, font=f_date, fill=BLACK)
 
+            icon_y = label_y + base_lh + 16
             if f_wi:
                 code = WI_MAP.get(day["cond"], 0xF00D)
                 icon_char = chr(code)
                 wi_bbox = f_wi.getbbox(icon_char)
                 wi_w = wi_bbox[2] - wi_bbox[0]
                 wi_h = wi_bbox[3] - wi_bbox[1]
-                icon_y = label_y + lh + 16
-                draw.text((cx - wi_w // 2, icon_y), icon_char, font=f_wi, fill=BLACK)
-                temp_y = icon_y + wi_h + 16
+                y_offset = (max_wi_h - wi_h) // 2
+                draw.text((cx - wi_w // 2, icon_y + y_offset), icon_char, font=f_wi, fill=BLACK)
+                temp_y = icon_y + max_wi_h + 16
             else:
-                icon_y = label_y + lh + 16
                 icon_sz = 32
                 draw_weather_icon(draw, day["cond"], cx, icon_y + icon_sz // 2, icon_sz, BLACK)
                 temp_y = icon_y + icon_sz + 16
@@ -424,9 +632,25 @@ class Renderer2x:
             tw, th = self._text_size(t_str, f_tiny)
             draw.text((cx - tw // 2, temp_y), t_str, font=f_tiny, fill=BLACK)
 
+    TABS = ["古诗", "英文佳句", "AI额度", "天文信息", "公众假期", "菜单三", "菜单四"]
+
+    def _draw_menu_bar(self, draw, data):
+        selected = data.get("selected_tab", "古诗")
+        f_tab = self.fonts["tab"]
+        tab_w = (self.L.W - 2 * self.L.M) / len(self.TABS)
+        x_start = self.L.M
+        for i, tab in enumerate(self.TABS):
+            tx = x_start + int(i * tab_w)
+            is_selected = (tab == selected)
+            fill = BLACK if is_selected else WHITE
+            next_tx = x_start + int((i + 1) * tab_w)
+            draw.rectangle((tx, self.L.BOTTOM_TOP, next_tx, self.L.BOTTOM_TOP + self.L.TAB_H), fill=fill, outline=BLACK)
+            tw, th = self._text_size(tab, f_tab)
+            draw.text((tx + (next_tx - tx - tw) // 2, self.L.BOTTOM_TOP + (self.L.TAB_H - th) // 2), tab, font=f_tab, fill=WHITE if is_selected else BLACK)
+
     def _draw_poem(self, draw, data):
         poem = data["poem"]
-        f = self.fonts["body"]
+        f = self.fonts["weather"]
         lines = poem.split('\n')
 
         line_widths = []
@@ -435,18 +659,97 @@ class Renderer2x:
             tw, th = self._text_size(text, f)
             line_widths.append((text, tw))
 
-        zone_h = self.L.BOTTOM_BOT - self.L.BOTTOM_TOP
-        line_h = 28
-        gap = 16
+        zone_h = self.L.BOTTOM_BOT - self.L.BOTTOM_TOP - self.L.TAB_H
+        font_size = getattr(f, 'size', 12)
+        ideal_line = font_size + 4
+        ideal_gap = 4
+        ideal_h = len(lines) * ideal_line + (len(lines) - 1) * ideal_gap
+        scale = min(1.0, (zone_h - 1) / ideal_h)
+        line_h = max(font_size, int(ideal_line * scale))
+        gap = max(1, int(ideal_gap * scale))
         total_h = len(lines) * line_h + (len(lines) - 1) * gap
+        if total_h > zone_h:
+            gap = max(1, (zone_h - len(lines) * line_h) // (len(lines) - 1))
+            total_h = len(lines) * line_h + (len(lines) - 1) * gap
 
-        zone_center_y = (self.L.BOTTOM_TOP + self.L.BOTTOM_BOT) // 2
+        content_top = self.L.BOTTOM_TOP + self.L.TAB_H
+        zone_center_y = (content_top + self.L.BOTTOM_BOT) // 2
         y = zone_center_y - total_h // 2
 
         for i, (text, tw) in enumerate(line_widths):
             x = (self.L.W - tw) // 2
             draw.text((x, y), text, font=f, fill=BLACK)
             y += line_h + gap
+
+    def _wrap_text(self, text, font, max_width):
+        """只按 \\n 换行；段落超出 max_width 时按字符强制换行"""
+        if not text:
+            return []
+        lines = []
+        for paragraph in text.split("\n"):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            tw, _ = self._text_size(paragraph, font)
+            if tw <= max_width:
+                lines.append(paragraph)
+            else:
+                current = ""
+                for ch in paragraph:
+                    test = current + ch
+                    tw, _ = self._text_size(test, font)
+                    if tw > max_width and current:
+                        lines.append(current)
+                        current = ch
+                    else:
+                        current = test
+                if current:
+                    lines.append(current)
+        return lines
+
+    def _draw_bottom_text(self, draw, data):
+        bottom = data.get("bottom", "")
+        weather_warning = data.get("weather_warning", "")
+        minute = data.get("now", {}).get("minute", 0)
+
+        if bottom and minute % 3 != 0:
+            text = bottom
+        else:
+            text = weather_warning if weather_warning else bottom
+
+        if not text:
+            return
+        f = self.fonts["weather"]
+        content_top = self.L.BOTTOM_TOP + 4
+        content_bot = self.L.BOTTOM_BOT - 4
+        max_width = self.L.W - 32
+        line_height = f.size + 4
+        zone_h = content_bot - content_top
+        max_lines = max(1, zone_h // line_height)
+
+        lines = self._wrap_text(text, f, max_width)
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            if lines:
+                last = lines[-1]
+                while last and self._text_size(last + "…", f)[0] > max_width:
+                    last = last[:-1]
+                if last:
+                    lines[-1] = last + "…"
+                else:
+                    lines.pop()
+
+        if not lines:
+            return
+
+        total_h = line_height * len(lines)
+        y_start = content_top + (zone_h - total_h) // 2
+
+        for i, line in enumerate(lines):
+            l, top, r, b = f.getbbox(line)
+            visual_h = b - top
+            y = y_start + i * line_height + (line_height - visual_h) // 2 - top
+            draw.text((16, y), line, font=f, fill=BLACK)
 
     def draw(self, data):
         img = Image.new("L", (self.L.W, self.L.H), WHITE)
@@ -465,7 +768,7 @@ class Renderer2x:
         self._draw_weekly_forecast(draw, data)
         self._hline(draw, self.L.DIV3_Y)
 
-        self._draw_poem(draw, data)
+        self._draw_bottom_text(draw, data)
 
         return img
 
@@ -524,18 +827,56 @@ class Renderer:
         now = data["now"]
         city = data["current"]["city"]
         f = self.fonts["small"]
+        f_tiny = self.fonts["tiny"]
         zone_center = (self.L.TOP_Y + self.L.DIV1_Y) // 2
         l, top, r, b = f.getbbox("Test")
         visual_h = b - top
         visual_center_offset = top + visual_h // 2
         y = zone_center - visual_center_offset
-        draw.text((self.L.M + 4, y), now["date_cn"], font=f, fill=BLACK)
+        date_x = self.L.M + 8
+        holiday = now.get("holiday", "")
+        # 始终用完整日期（含年份）
+        date_str = now["date_cn"]
+        draw.text((date_x, y), date_str, font=f, fill=BLACK)
+        holiday_end_x = date_x + self._text_size(date_str, f)[0]
+        if holiday:
+            date_tw, _ = self._text_size(date_str, f)
+            l2, top2, r2, b2 = f_tiny.getbbox(holiday)
+            visual_h2 = b2 - top2
+            visual_center_offset2 = top2 + visual_h2 // 2
+            y2 = zone_center - visual_center_offset2
+            draw.text((date_x + date_tw + 6, y2), holiday, font=f_tiny, fill=BLACK)
+            holiday_end_x = date_x + date_tw + 6 + self._text_size(holiday, f_tiny)[0]
+        # 星期放在日期/假期之后
         wd = now["weekday_cn"]
         tw, _ = self._text_size(wd, f)
-        draw.text(((self.L.W - tw) // 2, y), wd, font=f, fill=BLACK)
+        wd_x = holiday_end_x + 8
+        draw.text((wd_x, y), wd, font=f, fill=BLACK)
+        rssi = data.get("rssi")
         tw, _ = self._text_size(city, f)
-        draw.text((self.L.W - self.L.M - tw - 4, y), city, font=f, fill=BLACK)
+        right_edge = self.L.W - self.L.M - 8
+        city_x = right_edge - tw
+        wifi_w = self._draw_wifi_icon(draw, city_x - 8, y, rssi)
+        draw.text((city_x, y), city, font=f, fill=BLACK)
         self._hline(draw, self.L.DIV1_Y)
+
+    def _draw_wifi_icon(self, draw, x, y, rssi):
+        """在(x,y)位置画WiFi信号图标，x是右边界，y是文字基线，返回图标宽度"""
+        icon_w = 12
+        dot_r = 1
+        cx = x - icon_w // 2
+        dot_cy = y + 14
+        dot_cx = cx
+        draw.ellipse([dot_cx - dot_r, dot_cy - dot_r, dot_cx + dot_r, dot_cy + dot_r], fill=BLACK)
+        arcs = 3 if rssi is None or rssi >= -50 else (2 if rssi >= -70 else 1)
+        radii = [2, 4, 6]
+        for i in range(arcs):
+            r = radii[i]
+            top = dot_cy - r * 2
+            left = dot_cx - r
+            right = dot_cx + r
+            draw.arc([left, top, right, top + r * 2], 180, 360, fill=BLACK, width=1)
+        return icon_w
 
     def _draw_time(self, draw, data):
         t = data["now"]["time_str"]
@@ -558,81 +899,102 @@ class Renderer:
     def _draw_current_weather(self, draw, data):
         cw = data["current"]
         f_wi_big = self.fonts["wi_big"]
-        f_small = self.fonts["small"]
+        f_w = self.fonts["weather"]
 
         zone_top = self.L.MAIN_TOP
         zone_bot = self.L.MAIN_BOTTOM
-        zone_h = zone_bot - zone_top
 
-        env_temp = cw.get("env_temp")
-        if env_temp is not None:
-            temp_str = f'{cw["temp"]}°C / {env_temp:.1f}°C'
-        else:
-            temp_str = f'{cw["temp"]}°C'
+        env_temp = cw.get("env_temp") or cw.get("temp", 25.0)
+        feels_like = cw.get("feels_like", cw["temp"])
         cond_str = cw["cond_cn"]
+        wind_str = cw.get("wind", "")
         pressure_str = f'{cw["pressure"]}hPa'
+        humidity_str = f'{cw.get("humidity", 0)}%'
 
-        tw, th = self._text_size(temp_str, f_small)
-        cw_w, cw_h = self._text_size(cond_str, f_small)
-        pw, ph = self._text_size(pressure_str, f_small)
+        l, bbox_top, r, b = ImageDraw.Draw(Image.new("1", (1, 1))).textbbox((0, 0), "温", font=f_w)
+        margin = 8
+        row_gap = 3
+        row1_y = zone_top + margin - bbox_top
 
-        l, bbox_top, r, b = ImageDraw.Draw(Image.new("1", (1, 1))).textbbox((0, 0), "温", font=f_small)
-        col_x1 = self.L.WEATHER_X1 + 4
-        col_x2 = self.L.W - self.L.M - 4
+        row1_str = f'实时温度：{env_temp:.1f}°'
+        row2_str = f'体感温度：{feels_like}°'
+        row3_str = f'实时天气：{cond_str}'
+        row4_str = f'风向风力：{wind_str}'
+        row5_str = f'气压湿度：{pressure_str} / {humidity_str}'
+
+        _, h1 = self._text_size(row1_str, f_w)
+        row2_y = row1_y + h1 + row_gap
+        _, h2 = self._text_size(row2_str, f_w)
+        row3_y = row2_y + h2 + row_gap
+        _, h3 = self._text_size(row3_str, f_w)
+        row4_y = row3_y + h3 + row_gap
+        _, h4 = self._text_size(row4_str, f_w)
+        row5_y = row4_y + h4 + row_gap
+        _, h5 = self._text_size(row5_str, f_w)
+
+        col_x1 = self.L.WEATHER_X1 + 8
+        col_x2 = self.L.W - self.L.M - 8
         col_w = col_x2 - col_x1
 
-        icon_col_w = col_w // 3
-        text_col_x1 = col_x1 + icon_col_w
+        text_col_x2 = col_x2 - col_w // 3 - 8
+
+        three_rows_top = row1_y
+        three_rows_bot = row3_y + h3
+        three_rows_h = three_rows_bot - three_rows_top
+        icon_cy = (three_rows_top + three_rows_bot) // 2
 
         icon_char = chr(WI_MAP.get(cw["cond"], 0xF00D))
         icon_bbox = f_wi_big.getbbox(icon_char)
         icon_w = icon_bbox[2] - icon_bbox[0]
         icon_h = icon_bbox[3] - icon_bbox[1]
-
-        icon_cx = col_x1 + icon_col_w // 2
-        icon_cy = (zone_top + zone_bot) // 2
-        y_icon = icon_cy - icon_h // 2 - icon_bbox[1] + 1
+        icon_cx = (text_col_x2 + col_x2) // 2
+        y_icon = icon_cy - icon_h // 2 - icon_bbox[1]
         draw.text((icon_cx - icon_w // 2, y_icon), icon_char, font=f_wi_big, fill=BLACK)
 
-        margin = 8
-        row_gap = 8
-        row1_y = zone_top + margin - bbox_top
-        row2_y = row1_y + th + row_gap
-        row3_y = row2_y + cw_h + row_gap
-
-        text_col_center_x = text_col_x1 + (col_x2 - text_col_x1) // 2
-        text_x = text_col_center_x - tw // 2
-
-        draw.text((text_x, row1_y), temp_str, font=f_small, fill=BLACK)
-        draw.text((text_x, row2_y), cond_str, font=f_small, fill=BLACK)
-        draw.text((text_x, row3_y), pressure_str, font=f_small, fill=BLACK)
+        draw.text((col_x1, row1_y), row1_str, font=f_w, fill=BLACK)
+        draw.text((col_x1, row2_y), row2_str, font=f_w, fill=BLACK)
+        draw.text((col_x1, row3_y), row3_str, font=f_w, fill=BLACK)
+        draw.text((col_x1, row4_y), row4_str, font=f_w, fill=BLACK)
+        draw.text((col_x1, row5_y), row5_str, font=f_w, fill=BLACK)
 
     def _draw_weekly_forecast(self, draw, data):
         weekly = data["weekly"]
         col_w = (self.L.W - 2 * self.L.M) // 7
         x_start = self.L.M
         f_tiny = self.fonts["tiny"]
+        f_date = self.fonts["date"]
         f_wi = self.fonts["wi"]
+
+        if f_wi:
+            max_wi_h = 0
+            for day in weekly:
+                code = WI_MAP.get(day["cond"], 0xF00D)
+                icon_char = chr(code)
+                wi_bbox = f_wi.getbbox(icon_char)
+                wi_h = wi_bbox[3] - wi_bbox[1]
+                max_wi_h = max(max_wi_h, wi_h)
+
+        _, base_lh = self._text_size("今日", f_date)
+        label_y = self.L.FCST_Y
 
         for i, day in enumerate(weekly):
             cx = x_start + i * col_w + col_w // 2
 
             lbl = day["date_str"]
-            lw, lh = self._text_size(lbl, f_tiny)
-            label_y = self.L.FCST_Y
-            draw.text((cx - lw // 2, label_y), lbl, font=f_tiny, fill=BLACK)
+            lw, lh = self._text_size(lbl, f_date)
+            draw.text((cx - lw // 2, label_y), lbl, font=f_date, fill=BLACK)
 
+            icon_y = label_y + base_lh + 8
             if f_wi:
                 code = WI_MAP.get(day["cond"], 0xF00D)
                 icon_char = chr(code)
                 wi_bbox = f_wi.getbbox(icon_char)
                 wi_w = wi_bbox[2] - wi_bbox[0]
                 wi_h = wi_bbox[3] - wi_bbox[1]
-                icon_y = label_y + lh + 8
-                draw.text((cx - wi_w // 2, icon_y), icon_char, font=f_wi, fill=BLACK)
-                temp_y = icon_y + wi_h + 8
+                y_offset = (max_wi_h - wi_h) // 2
+                draw.text((cx - wi_w // 2, icon_y + y_offset), icon_char, font=f_wi, fill=BLACK)
+                temp_y = icon_y + max_wi_h + 8
             else:
-                icon_y = label_y + lh + 8
                 icon_sz = 16
                 draw_weather_icon(draw, day["cond"], cx, icon_y + icon_sz // 2, icon_sz, BLACK)
                 temp_y = icon_y + icon_sz + 8
@@ -641,9 +1003,25 @@ class Renderer:
             tw, th = self._text_size(t_str, f_tiny)
             draw.text((cx - tw // 2, temp_y), t_str, font=f_tiny, fill=BLACK)
 
+    TABS = ["古诗", "英文佳句", "AI额度", "天文信息", "公众假期", "菜单三", "菜单四"]
+
+    def _draw_menu_bar(self, draw, data):
+        selected = data.get("selected_tab", "古诗")
+        f_tab = self.fonts["tab"]
+        tab_w = (self.L.W - 2 * self.L.M) / len(self.TABS)
+        x_start = self.L.M
+        for i, tab in enumerate(self.TABS):
+            tx = x_start + int(i * tab_w)
+            is_selected = (tab == selected)
+            fill = BLACK if is_selected else WHITE
+            next_tx = x_start + int((i + 1) * tab_w)
+            draw.rectangle((tx, self.L.BOTTOM_TOP, next_tx, self.L.BOTTOM_TOP + self.L.TAB_H), fill=fill, outline=BLACK)
+            tw, th = self._text_size(tab, f_tab)
+            draw.text((tx + (next_tx - tx - tw) // 2, self.L.BOTTOM_TOP + (self.L.TAB_H - th) // 2), tab, font=f_tab, fill=WHITE if is_selected else BLACK)
+
     def _draw_poem(self, draw, data):
         poem = data["poem"]
-        f = self.fonts["body"]
+        f = self.fonts["weather"]
         lines = poem.split('\n')
 
         line_widths = []
@@ -652,12 +1030,13 @@ class Renderer:
             tw, th = self._text_size(text, f)
             line_widths.append((text, tw))
 
-        zone_h = self.L.BOTTOM_BOT - self.L.BOTTOM_TOP
-        line_h = 14
-        gap = 8
+        zone_h = self.L.BOTTOM_BOT - self.L.BOTTOM_TOP - self.L.TAB_H
+        line_h = 9
+        gap = 5
         total_h = len(lines) * line_h + (len(lines) - 1) * gap
 
-        zone_center_y = (self.L.BOTTOM_TOP + self.L.BOTTOM_BOT) // 2
+        content_top = self.L.BOTTOM_TOP + self.L.TAB_H
+        zone_center_y = (content_top + self.L.BOTTOM_BOT) // 2
         y = zone_center_y - total_h // 2
 
         for i, (text, tw) in enumerate(line_widths):
@@ -685,11 +1064,82 @@ class Renderer:
         right_x2 = self.L.W - self.L.M - 8
         cx = (right_x1 + right_x2) // 2
         x = cx - tw // 2
-        y = self._centered_y(f, line, self.L.BOTTOM_TOP, self.L.BOTTOM_BOT)
+        content_top = self.L.BOTTOM_TOP + self.L.TAB_H
+        y = self._centered_y(f, line, content_top, self.L.BOTTOM_BOT)
         draw.text((x, y), line, font=f, fill=BLACK)
 
+    def _wrap_text(self, text, font, max_width):
+        """只按 \\n 换行；段落超出 max_width 时按字符强制换行"""
+        if not text:
+            return []
+        lines = []
+        for paragraph in text.split("\n"):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            tw, _ = self._text_size(paragraph, font)
+            if tw <= max_width:
+                lines.append(paragraph)
+            else:
+                current = ""
+                for ch in paragraph:
+                    test = current + ch
+                    tw, _ = self._text_size(test, font)
+                    if tw > max_width and current:
+                        lines.append(current)
+                        current = ch
+                    else:
+                        current = test
+                if current:
+                    lines.append(current)
+        return lines
+
+    def _draw_bottom_text(self, draw, data):
+        bottom = data.get("bottom", "")
+        weather_warning = data.get("weather_warning", "")
+        minute = data.get("now", {}).get("minute", 0)
+
+        if bottom and minute % 3 != 0:
+            text = bottom
+        else:
+            text = weather_warning if weather_warning else bottom
+
+        if not text:
+            return
+        f = self.fonts["weather"]
+        content_top = self.L.BOTTOM_TOP + 4
+        content_bot = self.L.BOTTOM_BOT - 4
+        max_width = self.L.W - 32
+        line_height = f.size + 4
+        zone_h = content_bot - content_top
+        max_lines = max(1, zone_h // line_height)
+
+        lines = self._wrap_text(text, f, max_width)
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            if lines:
+                last = lines[-1]
+                while last and self._text_size(last + "…", f)[0] > max_width:
+                    last = last[:-1]
+                if last:
+                    lines[-1] = last + "…"
+                else:
+                    lines.pop()
+
+        if not lines:
+            return
+
+        total_h = line_height * len(lines)
+        y_start = content_top + (zone_h - total_h) // 2
+
+        for i, line in enumerate(lines):
+            l, top, r, b = f.getbbox(line)
+            visual_h = b - top
+            y = y_start + i * line_height + (line_height - visual_h) // 2 - top
+            draw.text((16, y), line, font=f, fill=BLACK)
+
     def draw(self, data):
-        img = Image.new("L", (W, H), WHITE)
+        img = Image.new("1", (W, H), 1)  # 1 = WHITE in 1-bit mode
         draw = ImageDraw.Draw(img)
         self._draw_border(draw)
         self._draw_top_bar(draw, data)
@@ -705,7 +1155,7 @@ class Renderer:
         self._draw_weekly_forecast(draw, data)
         self._hline(draw, self.L.DIV3_Y)
 
-        self._draw_poem(draw, data)
+        self._draw_bottom_text(draw, data)
 
         return img
 
@@ -714,8 +1164,7 @@ class Renderer:
             import data as _data
             data = _data.collect()
         img = self.draw(data)
-        img_1bit = img.convert("1", dither=Image.Dither.NONE)
-        return img_1bit, img
+        return img, img.convert("L")
 
 
 # ============================================================
@@ -742,14 +1191,27 @@ def render_raw(data=None):
 
 
 def render_hires(data=None):
-    """直接 1x 渲染，不做超采样"""
+    """2x 超采样：先在 800x600 渲染灰度，再缩到 400x300 并二值化"""
     if data is None:
         import data as _data
         data = _data.collect()
 
-    r = Renderer()
-    img_1bit, img = r.render(data)
-    return img_1bit, img
+    r = Renderer2x()
+    img_big = r.render(data)
+
+    # 缩到 400x300：LANCZOS 平滑
+    img_small = img_big.resize((W, H), Image.LANCZOS)
+
+    # 灰度 → 1bit：Floyd-Steinberg 抖动（比硬阈值更平滑）
+    img_gray_small = img_small.convert("L")
+    img_1bit_small = img_gray_small.convert("1", dither=Image.Dither.FLOYDSTEINBERG)
+
+    # 在缩小后的图上重画分割线（避免 1px 线被 LANCZOS 平均掉）
+    draw = ImageDraw.Draw(img_1bit_small)
+    for y in (Layout2x.DIV1_Y // 2, Layout2x.DIV2_Y // 2, Layout2x.DIV3_Y // 2):
+        draw.line([(Layout.M, y), (Layout.W - Layout.M, y)], fill=BLACK, width=1)
+
+    return img_1bit_small, img_small
 
 
 def to_png_bytes(img):
@@ -759,8 +1221,9 @@ def to_png_bytes(img):
     return buf.getvalue()
 
 
-def to_buffer(img):
-    """PIL 1-bit Image → 15000 字节"""
+def to_buffer(img, selected_tab="古诗", tabs=None):
+    """PIL 1-bit Image → 15000 字节
+    e-paper 用 0=BLACK, 1=WHITE 标准位序，直接 tobytes 即可"""
     expected = W * H // 8
     raw = img.tobytes()
     if len(raw) != expected:
@@ -771,7 +1234,8 @@ def to_buffer(img):
 def render_buffer(data=None):
     """一次性渲染并返回 15000 字节 raw buffer"""
     img = render(data)
-    return to_buffer(img)
+    selected = data.get("selected_tab", "古诗") if data else "古诗"
+    return to_buffer(img, selected_tab=selected)
 
 
 # ============================================================

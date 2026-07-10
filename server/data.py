@@ -13,6 +13,79 @@ import zoneinfo
 import requests
 
 # ============================================================
+# 香港公众假期 2026-2027
+# ============================================================
+HK_HOLIDAYS = {
+    2026: [
+        ("2026-01-01", "元旦"),
+        ("2026-01-29", "农历新年"),
+        ("2026-01-30", "农历新年"),
+        ("2026-01-31", "农历新年"),
+        ("2026-02-01", "农历新年补假"),
+        ("2026-04-04", "清明节"),
+        ("2026-04-05", "清明节补假"),
+        ("2026-05-01", "劳动节"),
+        ("2026-05-03", "佛诞补假"),
+        ("2026-05-05", "佛诞"),
+        ("2026-05-26", "端午节"),
+        ("2026-05-31", "端午节补假"),
+        ("2026-07-01", "香港回归纪念日"),
+        ("2026-09-08", "中秋节"),
+        ("2026-09-09", "中秋节翌日"),
+        ("2026-10-01", "国庆日"),
+        ("2026-10-02", "国庆日补假"),
+        ("2026-10-07", "重阳节"),
+        ("2026-10-08", "重阳节补假"),
+        ("2026-12-25", "圣诞节"),
+        ("2026-12-26", "圣诞节翌日"),
+    ],
+    2027: [
+        ("2027-01-01", "元旦"),
+        ("2027-02-17", "农历新年"),
+        ("2027-02-18", "农历新年"),
+        ("2027-02-19", "农历新年"),
+        ("2027-02-20", "农历新年"),
+        ("2027-02-21", "农历新年补假"),
+        ("2027-04-05", "清明节"),
+        ("2027-04-06", "清明节补假"),
+        ("2027-05-01", "劳动节"),
+        ("2027-05-03", "劳动节补假"),
+        ("2027-05-26", "佛诞"),
+        ("2027-06-15", "端午节"),
+        ("2027-06-16", "端午节补假"),
+        ("2027-07-01", "香港回归纪念日"),
+        ("2027-09-15", "中秋节"),
+        ("2027-09-16", "中秋节翌日"),
+        ("2027-10-01", "国庆日"),
+        ("2027-10-04", "国庆日补假"),
+        ("2027-10-07", "重阳节"),
+        ("2027-12-25", "圣诞节"),
+        ("2027-12-26", "圣诞节翌日"),
+        ("2027-12-27", "圣诞节补假"),
+    ],
+}
+
+def get_holidays_month(year, month):
+    """获取指定月份的公众假期"""
+    holidays = HK_HOLIDAYS.get(year, [])
+    lines = []
+    for date_str, name in holidays:
+        y, m, d = map(int, date_str.split("-"))
+        if y == year and m == month:
+            lines.append(f"{d}日 {name}")
+    return lines if lines else [f"{month}月无公众假期"]
+
+
+def get_today_holiday(year, month, day):
+    """获取指定日期的公众假期名称；不是假期返回空字符串"""
+    date_key = f"{year:04d}-{month:02d}-{day:02d}"
+    holidays = HK_HOLIDAYS.get(year, [])
+    for date_str, name in holidays:
+        if date_str == date_key:
+            return name
+    return ""
+
+# ============================================================
 # ⚙️ 配置区
 # ============================================================
 
@@ -34,6 +107,7 @@ MOCK_CURRENT = {
     "feels_like": 27,
     "humidity":   45,
     "wind":      "东南风 2级",
+    "wind_deg":  135,
     "pressure":  1013,
 }
 
@@ -168,6 +242,7 @@ def now(tz_name=TZ_NAME, client_time=None):
             "date_cn":    f"{t.year}年{t.month}月{t.day}日",
             "time_str":   f"{t.hour:02d}:{t.minute:02d}",
             "iso":        t.strftime("%Y-%m-%d %H:%M:%S"),
+            "holiday":    get_today_holiday(t.year, t.month, t.day),
         }
         _last_minute = t.minute
     return _time_cache
@@ -191,8 +266,9 @@ def current_weather():
             "feels_like": MOCK_CURRENT["feels_like"],
             "humidity":  MOCK_CURRENT["humidity"],
             "wind":      MOCK_CURRENT["wind"],
+            "wind_deg":  MOCK_CURRENT["wind_deg"],
             "pressure":   MOCK_CURRENT["pressure"],
-            "env_temp":  _data_module.ENV_TEMP,
+            "env_temp":  _data_module.ENV_TEMP if hasattr(_data_module, 'ENV_TEMP') and _data_module.ENV_TEMP is not None else MOCK_CURRENT["temp"],
         }
 
     try:
@@ -216,8 +292,9 @@ def current_weather():
             "feels_like": int(round(data["main"]["feels_like"])),
             "humidity":  data["main"]["humidity"],
             "wind":      f"{wind_dir} {wind_level}级",
+            "wind_deg":  wind_deg,
             "pressure":   data["main"]["pressure"],
-            "env_temp":  _data_module.ENV_TEMP,
+            "env_temp":  _data_module.ENV_TEMP if hasattr(_data_module, 'ENV_TEMP') and _data_module.ENV_TEMP is not None else int(round(data["main"]["temp"])),
         }
     except Exception as e:
         print(f"天气 API 失败: {e}")
@@ -232,8 +309,9 @@ def current_weather():
             "feels_like": MOCK_CURRENT["feels_like"],
             "humidity":  MOCK_CURRENT["humidity"],
             "wind":      MOCK_CURRENT["wind"],
+            "wind_deg":  MOCK_CURRENT["wind_deg"],
             "pressure":   MOCK_CURRENT["pressure"],
-            "env_temp":  _data_module.ENV_TEMP,
+            "env_temp":  _data_module.ENV_TEMP if hasattr(_data_module, 'ENV_TEMP') and _data_module.ENV_TEMP is not None else MOCK_CURRENT["temp"],
         }
 
 
@@ -383,15 +461,100 @@ def _get_weather(force_refresh=False):
 
 
 # ============================================================
+# 香港天文台天气警告/预报 (flw)
+# ============================================================
+
+_hko_cache = None
+_hko_cache_time = 0
+HKO_CACHE_TTL = 900  # 15 分钟
+
+def get_hko_warning(force_refresh=False):
+    """获取香港天文台天气信息 (generalSituation 首句 + tcInfo)，带 15 分钟缓存"""
+    global _hko_cache, _hko_cache_time
+    now = time.time()
+    if force_refresh or _hko_cache is None or (now - _hko_cache_time) > HKO_CACHE_TTL:
+        try:
+            import requests as _requests
+            r = _requests.get(
+                "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=flw&lang=sc",
+                headers={"Accept-Encoding": "gzip"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                import json
+                j = json.loads(r.text)
+                gs = j.get("generalSituation", "").strip()
+                gs_first = gs.split("。")[0] + "。" if gs else ""
+                tc = j.get("tcInfo", "").strip()
+                parts = []
+                if gs_first:
+                    parts.append(gs_first)
+                if tc:
+                    parts.append(tc)
+                _hko_cache = "\n".join(parts)
+                _hko_cache_time = now
+                print(f"[HKO] 刷新缓存: gs={bool(gs_first)} tc={bool(tc)}")
+            else:
+                print(f"[HKO] 请求失败: {r.status_code}")
+        except Exception as e:
+            print(f"[HKO] 获取失败: {e}")
+            if _hko_cache is None:
+                _hko_cache = ""
+    else:
+        print(f"[HKO] 使用缓存 (age={int(now - _hko_cache_time)}s)")
+    return _hko_cache if _hko_cache else ""
+
+
+# ============================================================
 # 6. 一站式入口
 # ============================================================
 
-def collect(force_refresh=False, client_time=None):
+def tab_content(selected_tab, client_time=None):
+    """根据选中标签返回对应内容"""
+    poem = daily_poem()
+    if selected_tab == "公众假期":
+        now_ts = time.time() if client_time is None else _parse_client_time(client_time)
+        local = datetime.datetime.fromtimestamp(now_ts, zoneinfo.ZoneInfo(TZ_NAME))
+        holidays = get_holidays_month(local.year, local.month)
+        return "\n".join(holidays)
+    elif selected_tab == "天文信息":
+        return "天文信息功能\n开发中..."
+    elif selected_tab == "英文佳句":
+        return "English quotes\ncoming soon..."
+    elif selected_tab == "AI额度":
+        return "AI额度功能\n开发中..."
+    elif selected_tab == "菜单三":
+        return "菜单三内容"
+    elif selected_tab == "菜单四":
+        return "菜单四内容"
+    else:
+        return poem
+
+def _parse_client_time(client_time):
+    """解析 client_time 字符串为 timestamp"""
+    try:
+        dt = datetime.datetime.fromisoformat(client_time.replace("T", " ").replace("Z", "+00:00"))
+        return dt.timestamp()
+    except:
+        return time.time()
+
+def collect(force_refresh=False, client_time=None, rssi=None):
     weather = _get_weather(force_refresh)
+    bottom_custom = load_bottom_content()
+    hko_warning = get_hko_warning(force_refresh)
     return {
-        "now":       now(client_time=client_time),
-        "current":   weather["current"],
-        "weekly":    weather["weekly"],
-        "poem":      daily_poem(),
-        "countdowns": countdowns(),
+        "now":           now(client_time=client_time),
+        "current":       weather["current"],
+        "weekly":        weather["weekly"],
+        "countdowns":    countdowns(),
+        "bottom":        bottom_custom,
+        "weather_warning": hko_warning,
+        "rssi": rssi,
     }
+
+def load_bottom_content():
+    try:
+        with open("bottom_content.txt", "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except:
+        return ""

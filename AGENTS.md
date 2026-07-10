@@ -33,6 +33,19 @@ row1_y = zone_top + margin - bbox_top  # 不是 zone_top + margin
 - **1x** (400x300): margin=8, row_gap=8
 - **2x** (800x600): margin=16, row_gap=16
 
+### 顶部栏（_draw_top_bar）
+- 日期在左（`self.L.M + 8`），周几居中，城市+WiFi 在右
+- 当天是公众假期时，日期后用 **tiny 字体**（1x=10px, 2x=20px）显示假期名
+- 假期数据在 `data.py` 的 `HK_HOLIDAYS`（2026/2027）
+
+### 底部文本框边距（_draw_bottom_text）
+- 左右固定 **16px**（写死，远离 1x 边框 x=8 和 2x 边框 x=0）
+- 上下 **+4 / -4** 在 BOTTOM_TOP / BOTTOM_BOT 内
+- `max_width = self.L.W - 32`（16 左边 + 16 右边，左右边距相同）
+- **不自动换行**：无 `\n` 时单行显示（段落不超过 max_width）
+- **超宽按字符切**：段落超过 max_width 时按字符贪心断行
+- **超行截断**：超出 max_lines 时末尾加 `…`
+
 ## 布局常量
 
 ### 1x Layout
@@ -101,7 +114,7 @@ T=60+ε ESP32 收到，立刻 display
 
 **关键常量**（clock.py 顶部）：
 ```python
-NTP_HOST        = "stdtime.gov.hk"   # 香港天文台 NTP 源（IPv4）
+NTP_HOST        = "0.hk.pool.ntp.org"   # 香港 NTP 池（更可靠）
 NTP_SYNC_BEFORE = 8   # 整点前 8 秒 NTP 同步
 FETCH_BEFORE    = 5   # 整点前 5 秒发起请求
 ```

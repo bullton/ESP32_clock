@@ -26,7 +26,7 @@ import ds18x20
 # ========== 配置 ==========
 WIFI_SSID     = "NETGEAR_28A"
 WIFI_PASSWORD = "18005711470"
-SERVER_URL    = "http://192.168.50.180:5000/api/screen_2x"
+SERVER_URL    = "http://192.168.50.180:5000/api/screen"
 NTP_HOST      = "stdtime.gov.hk"
 TZ_OFFSET_SEC = 8 * 3600
 
