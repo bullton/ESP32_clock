@@ -6,6 +6,10 @@ __pycache__/
 *.bin
 *.jpg
 *.svg
+
+# 跟踪天气警告图标 (HKO 官方)
+!server/icon/
+!server/icon/*.png
 .vscode/
 .idea/
 .DS_Store
