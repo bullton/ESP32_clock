@@ -665,3 +665,8 @@ def load_bottom_content():
             return f.read().strip()
     except:
         return ""
+
+
+def save_bottom_content(content: str):
+    with open("bottom_content.txt", "w", encoding="utf-8") as f:
+        f.write(content)

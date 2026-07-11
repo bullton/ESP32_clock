@@ -215,6 +215,18 @@ def admin():
     return render_template("admin.html")
 
 
+@app.route("/api/bottom_content")
+def api_bottom_content_get():
+    return jsonify({"content": data.load_bottom_content()})
+
+
+@app.route("/api/bottom_content", methods=["POST"])
+def api_bottom_content_save():
+    payload = request.get_json()
+    data.save_bottom_content(payload.get("content", ""))
+    return jsonify({"ok": True})
+
+
 @app.route("/api/info")
 def api_info():
     env_temp = request.args.get("env_temp")
