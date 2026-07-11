@@ -38,6 +38,7 @@ FULL_REFRESH_INTERVAL = 3600
 NTP_SYNC_BEFORE      = 7              # 整点前 7 秒 NTP 同步
 FETCH_LEAD           = 5              # 整点前 5 秒 fetch，让服务端 sleep 5 秒到整点返回
 DISPLAY_BEFORE       = 0.3            # display 启动在整点前 0.3 秒
+HOURLY_FULL_REFRESH  = True          # 整点时强制全刷（避免 partial 残留像素）
 
 # ========== 硬件初始化 ==========
 def init_epd():
@@ -242,7 +243,9 @@ def main():
             sleep_until(display_at)
 
         # ===== display =====
-        force_full = (target_ticks - last_full) > FULL_REFRESH_INTERVAL
+        # 每小时整点强制全刷（避免 partial 残留 ghost 像素）
+        is_hourly = (time.localtime(target_ticks + TZ_OFFSET_SEC)[4] == 0)
+        force_full = is_hourly or (target_ticks - last_full) > FULL_REFRESH_INTERVAL
         display(epd, buf, force_full=force_full)
         actual = time.time()
         drift = actual - target_ticks  # display 完成相对整点的偏差
