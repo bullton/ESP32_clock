@@ -37,6 +37,7 @@ ESP32 墨水屏天气时钟，Python Flask 服务端渲染 → 15000 字节 raw 
     ├── app.py          # Flask 入口
     ├── data.py         # 数据采集（HKO 天气、假期、警告）
     ├── renderer.py     # 1x / 2x 渲染器（PIL）
+    ├── icon/           # 天气警告图标（21 个 HKO 官方 PNG）
     ├── templates/
     │   └── admin.html  # 后台管理界面
     └── bottom_content.txt  # 用户自定义底部文本
@@ -98,12 +99,43 @@ GPIO：
 ## 数据源
 
 - 实时天气 + 7 日预报：香港天文台（HKO）公开 JSON
-- 天气警告：HKO 警告信息 API（15 分钟缓存）
+- 天气警告：HKO `warningInfo` API（带图标）+ `flw` API（纯文本，均 15 分钟缓存）
 - 公众假期：内置 2026/2027 香港假期表（`data.py:HK_HOLIDAYS`）
 
 ## 版本
 
-- **v1.0** - 4 区布局（顶/主/中/底）、HKO 数据、自定义文本轮换、假期显示
+### v1.1 (2026-07-11) — 天气警告图标 + 多屏轮换
+
+**新增**
+- 21 个 HKO 官方天气警告图标（热带气旋信号 1/3/8NE/NW/SE/SW/9/10、暴雨黄/红/黑、雷暴、北区水浸、山泥倾泻、强季风、霜冻、火警黄/红、寒冷、酷热、海啸），保存在 `server/icon/`
+- `WARNING_ICON_MAP`：`warningStatementCode` + `subtype` → 图标文件名映射
+- `get_flw_warning()`：调用 HKO `flw` API（dataType=flw），返回 `generalSituation` + `tcInfo` 纯文本
+- `data.py:collect()` 返回 `flw_warning` 字段
+- 底部三屏轮换：告警（图标+文本）/ flw 纯文本 / 自定义内容，每屏 1 分钟
+
+**改进**
+- 多告警自适应布局：
+  - 1 个：单图标 + 文字
+  - 2 个：横向双图标（不缩小）+ 文字挤压
+  - 3+ 个：屏 1 显示所有图标（无文字）→ 屏 2 显示合并文字
+- 告警文本超长自动按 `max_lines` 分页，每页独立显示 1 分钟
+- 只取告警 `contents` 前 2 项，避免过多分屏
+- 图标垂直居中（+6px 偏移）
+- 图标顶端对齐"满 4 行文字"位置，分屏时各页图标大小一致不缩放
+
+**修改文件**
+- `server/data.py` — `get_hko_warning()` 重写为 `warningInfo` API，新增 `get_flw_warning()`
+- `server/renderer.py` — `_draw_bottom_text()` 重构为分屏逻辑（两个渲染器）
+- `server/icon/*.png` — 21 个图标文件
+- `.gitignore` — 跟踪 `server/icon/`
+
+### v1.0 — 4 区布局 + HKO 数据 + 自定义文本轮换 + 假期显示
+
+- 顶部栏：日期 + 公众假期 + 星期 + 城市 + WiFi 信号
+- 主区：左大时间 + 右实时温度/体感/风力/湿度
+- 中区：未来 7 日天气预报
+- 底部：自定义文本 / HKO 警告纯文本 / flw 文本轮换
+- ESP32 整点准时刷新方案（精度 < 1 秒）
 
 ## 许可
 
