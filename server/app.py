@@ -210,6 +210,11 @@ def preview():
     return render_template("preview.html")
 
 
+@app.route("/admin")
+def admin():
+    return render_template("admin.html")
+
+
 @app.route("/api/info")
 def api_info():
     env_temp = request.args.get("env_temp")
