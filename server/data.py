@@ -468,11 +468,116 @@ _hko_cache = None
 _hko_cache_time = 0
 HKO_CACHE_TTL = 900  # 15 分钟
 
+_flw_cache = None
+_flw_cache_time = 0
+FLW_CACHE_TTL = 900  # 15 分钟
+
+
+# 天气警告图标映射 (warningStatementCode + subtype -> icon filename)
+# 参考 HKO Open Data API 文档 v1.13
+WARNING_ICON_MAP = {
+    # 热带气旋信号
+    ("WTCSGNL", "TC1"):   "01_tc1.png",
+    ("WTCSGNL", "TC3"):   "02_tc3.png",
+    ("WTCSGNL", "TC8NE"): "03_tc08ne.png",
+    ("WTCSGNL", "TC8NW"): "04_tc08nw.png",
+    ("WTCSGNL", "TC8SE"): "05_tc08se.png",
+    ("WTCSGNL", "TC8SW"): "06_tc08sw.png",
+    ("WTCSGNL", "TC9"):   "07_tc09.png",
+    ("WTCSGNL", "TC10"):  "08_tc10.png",
+    # 暴雨警告
+    ("WRAIN", "WRAINA"):  "09_rain_amber.png",
+    ("WRAIN", "WRAINR"):  "10_rain_red.png",
+    ("WRAIN", "WRAINB"):  "11_rain_black.png",
+    # 其他警告（无 subtype 时按 code 匹配）
+    ("WTS",      None):   "12_thunderstorm.png",
+    ("WFNTSA",   None):   "13_north_flood.png",
+    ("WL",       None):   "14_landslide.png",
+    ("WMSGNL",   None):   "15_strong_monsoon.png",
+    ("WFROST",   None):   "16_frost.png",
+    ("WFIRE",    "WFIREY"): "17_fire_yellow.png",
+    ("WFIRE",    "WFIRER"): "18_fire_red.png",
+    ("WCOLD",    None):   "19_cold.png",
+    ("WHOT",     None):   "20_hot.png",
+    ("WTMW",     None):   "21_tsunami.png",
+}
+
+
+def get_warning_icon(statement_code, subtype=None):
+    """根据 warningStatementCode 和 subtype 返回图标文件名，没匹配返回 None"""
+    key = (statement_code, subtype)
+    if key in WARNING_ICON_MAP:
+        return WARNING_ICON_MAP[key]
+    # 退回只用 code 匹配
+    key2 = (statement_code, None)
+    return WARNING_ICON_MAP.get(key2)
+
+
 def get_hko_warning(force_refresh=False):
-    """获取香港天文台天气信息 (generalSituation 首句 + tcInfo)，带 15 分钟缓存"""
+    """获取香港天文台天气警告信息，带 15 分钟缓存
+
+    返回 dict:
+        {
+            "details": [
+                {
+                    "code": "WTS",            # warningStatementCode
+                    "subtype": None,           # subtype（如有）
+                    "name": "雷暴警告",         # 警告名稱
+                    "icon": "12_thunderstorm.png",  # 图标文件名
+                    "text": ["警告内容..."]    # contents 列表
+                },
+                ...
+            ]
+        }
+    """
     global _hko_cache, _hko_cache_time
     now = time.time()
     if force_refresh or _hko_cache is None or (now - _hko_cache_time) > HKO_CACHE_TTL:
+        try:
+            import requests as _requests
+            r = _requests.get(
+                "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=warningInfo&lang=sc",
+                headers={"Accept-Encoding": "gzip"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                import json
+                j = json.loads(r.text)
+                details_raw = j.get("details", []) or []
+                details = []
+                for item in details_raw:
+                    code = item.get("warningStatementCode", "")
+                    subtype = item.get("subtype")
+                    icon = get_warning_icon(code, subtype)
+                    details.append({
+                        "code":    code,
+                        "subtype": subtype,
+                        "name":    (item.get("contents", []) or [""])[0] or code,
+                        "icon":    icon,
+                        "text":    item.get("contents", []) or [],
+                    })
+                _hko_cache = {"details": details}
+                _hko_cache_time = now
+                print(f"[HKO] 刷新警告缓存: {len(details)} 条")
+            else:
+                print(f"[HKO] 请求失败: {r.status_code}")
+        except Exception as e:
+            print(f"[HKO] 获取失败: {e}")
+            if _hko_cache is None:
+                _hko_cache = {"details": []}
+    else:
+        print(f"[HKO] 使用缓存 (age={int(now - _hko_cache_time)}s)")
+    return _hko_cache if _hko_cache else {"details": []}
+
+
+def get_flw_warning(force_refresh=False):
+    """获取香港天文台天气预报信息（flw API），带 15 分钟缓存
+
+    返回 string（纯文本），包含 generalSituation 首句 + tcInfo
+    """
+    global _flw_cache, _flw_cache_time
+    now = time.time()
+    if force_refresh or _flw_cache is None or (now - _flw_cache_time) > FLW_CACHE_TTL:
         try:
             import requests as _requests
             r = _requests.get(
@@ -491,18 +596,18 @@ def get_hko_warning(force_refresh=False):
                     parts.append(gs_first)
                 if tc:
                     parts.append(tc)
-                _hko_cache = "\n".join(parts)
-                _hko_cache_time = now
-                print(f"[HKO] 刷新缓存: gs={bool(gs_first)} tc={bool(tc)}")
+                _flw_cache = "\n".join(parts)
+                _flw_cache_time = now
+                print(f"[HKO] 刷新 flw 缓存: gs={bool(gs_first)} tc={bool(tc)}")
             else:
-                print(f"[HKO] 请求失败: {r.status_code}")
+                print(f"[HKO] flw 请求失败: {r.status_code}")
         except Exception as e:
-            print(f"[HKO] 获取失败: {e}")
-            if _hko_cache is None:
-                _hko_cache = ""
+            print(f"[HKO] flw 获取失败: {e}")
+            if _flw_cache is None:
+                _flw_cache = ""
     else:
-        print(f"[HKO] 使用缓存 (age={int(now - _hko_cache_time)}s)")
-    return _hko_cache if _hko_cache else ""
+        print(f"[HKO] 使用 flw 缓存 (age={int(now - _flw_cache_time)}s)")
+    return _flw_cache if _flw_cache else ""
 
 
 # ============================================================
@@ -542,13 +647,15 @@ def collect(force_refresh=False, client_time=None, rssi=None):
     weather = _get_weather(force_refresh)
     bottom_custom = load_bottom_content()
     hko_warning = get_hko_warning(force_refresh)
+    flw_warning = get_flw_warning(force_refresh)
     return {
         "now":           now(client_time=client_time),
         "current":       weather["current"],
         "weekly":        weather["weekly"],
         "countdowns":    countdowns(),
         "bottom":        bottom_custom,
-        "weather_warning": hko_warning,
+        "weather_warning": hko_warning,  # dict: {"details": [...]}
+        "flw_warning":   flw_warning,    # string (plain text)
         "rssi": rssi,
     }
 
