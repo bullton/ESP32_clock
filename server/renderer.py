@@ -709,16 +709,17 @@ class Renderer2x:
 
     def _draw_bottom_text(self, draw, data):
         bottom = data.get("bottom", "")
-        weather_warning = data.get("weather_warning", "")
+        weather_warning = data.get("weather_warning", {})
+        flw_warning = data.get("flw_warning", "")
         minute = data.get("now", {}).get("minute", 0)
 
-        if bottom and minute % 3 != 0:
-            text = bottom
-        else:
-            text = weather_warning if weather_warning else bottom
+        warning_details = []
+        if isinstance(weather_warning, dict):
+            warning_details = weather_warning.get("details", []) or []
+        elif isinstance(weather_warning, str):
+            if weather_warning:
+                warning_details = [{"text": weather_warning.split("\n"), "name": "警告", "icon": None, "code": "", "subtype": None}]
 
-        if not text:
-            return
         f = self.fonts["weather"]
         content_top = self.L.BOTTOM_TOP + 4
         content_bot = self.L.BOTTOM_BOT - 4
@@ -727,29 +728,135 @@ class Renderer2x:
         zone_h = content_bot - content_top
         max_lines = max(1, zone_h // line_height)
 
-        lines = self._wrap_text(text, f, max_width)
-        if len(lines) > max_lines:
-            lines = lines[:max_lines]
-            if lines:
-                last = lines[-1]
-                while last and self._text_size(last + "…", f)[0] > max_width:
-                    last = last[:-1]
-                if last:
-                    lines[-1] = last + "…"
-                else:
-                    lines.pop()
+        icon_margin = 8
+        icon_size_full = zone_h - icon_margin * 2
+
+        def wrap_into_pages(text, page_max_w):
+            if not text:
+                return [[]]
+            lines = self._wrap_text(text, f, page_max_w)
+            if len(lines) <= max_lines:
+                return [lines]
+            return [lines[i:i + max_lines] for i in range(0, len(lines), max_lines)]
+
+        # Build warning pages: list of (text_lines, icons_list)
+        warning_pages = []
+        n_w = len(warning_details)
+
+        if n_w == 0:
+            pass
+        elif n_w == 1:
+            w = warning_details[0]
+            icons = [w["icon"]] if w.get("icon") else []
+            text = "\n".join((w.get("text", []) or [])[:2])
+            if icons:
+                pmw = max_width - (icon_size_full + 8)
+            else:
+                pmw = max_width
+            for chunk in wrap_into_pages(text, pmw):
+                warning_pages.append((chunk, icons))
+        elif n_w == 2:
+            icons = [w.get("icon") for w in warning_details if w.get("icon")]
+            parts = []
+            for w in warning_details:
+                parts.extend((w.get("text", []) or [])[:2])
+            text = "\n".join(parts)
+            text_x_offset = 2 * icon_size_full + 4 + 8
+            pmw = max_width - text_x_offset + 16
+            for chunk in wrap_into_pages(text, pmw):
+                warning_pages.append((chunk, icons))
+        else:
+            icons = [w.get("icon") for w in warning_details if w.get("icon")]
+            warning_pages.append(([], icons))
+            parts = []
+            for w in warning_details:
+                parts.extend((w.get("text", []) or [])[:2])
+            text = "\n".join(parts)
+            for chunk in wrap_into_pages(text, max_width):
+                warning_pages.append((chunk, []))
+
+        pages = []
+        pages.extend(warning_pages)
+        if flw_warning:
+            for chunk in wrap_into_pages(flw_warning, max_width):
+                pages.append((chunk, []))
+        if bottom:
+            for chunk in wrap_into_pages(bottom, max_width):
+                pages.append((chunk, []))
+
+        if not pages:
+            return
+
+        page_idx = minute % len(pages)
+        lines, icons = pages[page_idx]
+        n_icons = len(icons)
+
+        if n_icons == 0:
+            text_x = 16
+            text_max_w = max_width
+            icon_size = 0
+            icon_y_for_text = 0
+        elif n_icons == 1:
+            icon_size = icon_size_full
+            text_x = 16 + icon_size + 8
+            text_max_w = max_width - (icon_size + 8)
+        elif n_icons == 2:
+            icon_size = icon_size_full
+            text_x = 16 + 2 * icon_size + 4 + 8
+            text_max_w = max_width - (2 * icon_size + 4 + 8)
+        else:
+            gap = 4
+            icon_size = min(icon_size_full, (max_width - (n_icons - 1) * gap) // n_icons)
+            total_w = n_icons * icon_size + (n_icons - 1) * gap
+            start_x = (self.L.W - total_w) // 2
+            icon_y_for_text = 0
+            text_x = 16
+            text_max_w = max_width
+
+        if n_icons >= 3 and not lines:
+            icon_y = content_top + (zone_h - icon_size) // 2
+            for i, icon_name in enumerate(icons):
+                ix = start_x + i * (icon_size + gap)
+                self._draw_warning_icon(draw, icon_name, (ix, icon_y), icon_size)
+            return
 
         if not lines:
             return
 
         total_h = line_height * len(lines)
-        y_start = content_top + (zone_h - total_h) // 2
+        y_start = content_top + (zone_h - total_h) // 2 + 6
+
+        max_text_h = line_height * max_lines
+        y_start_max = content_top + (zone_h - max_text_h) // 2 + 6
+        icon_y = y_start_max
+
+        if n_icons == 1:
+            self._draw_warning_icon(draw, icons[0], (16, icon_y), icon_size_full)
+        elif n_icons == 2:
+            icon1_x = 16
+            icon2_x = icon1_x + icon_size_full + 4
+            self._draw_warning_icon(draw, icons[0], (icon1_x, icon_y), icon_size_full)
+            self._draw_warning_icon(draw, icons[1], (icon2_x, icon_y), icon_size_full)
 
         for i, line in enumerate(lines):
             l, top, r, b = f.getbbox(line)
             visual_h = b - top
             y = y_start + i * line_height + (line_height - visual_h) // 2 - top
-            draw.text((16, y), line, font=f, fill=BLACK)
+            draw.text((text_x, y), line, font=f, fill=BLACK)
+
+    def _draw_warning_icon(self, draw, icon_name, pos, size):
+        import os
+        icon_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon")
+        icon_path = os.path.join(icon_dir, icon_name)
+        if not os.path.exists(icon_path):
+            return
+        try:
+            from PIL import Image
+            img = Image.open(icon_path).convert("L")
+            img = img.resize((size, size), Image.LANCZOS)
+            draw._image.paste(img, pos)
+        except Exception as e:
+            print(f"[renderer] 加载图标失败 {icon_name}: {e}")
 
     def draw(self, data):
         img = Image.new("L", (self.L.W, self.L.H), WHITE)
@@ -1096,16 +1203,17 @@ class Renderer:
 
     def _draw_bottom_text(self, draw, data):
         bottom = data.get("bottom", "")
-        weather_warning = data.get("weather_warning", "")
+        weather_warning = data.get("weather_warning", {})
+        flw_warning = data.get("flw_warning", "")
         minute = data.get("now", {}).get("minute", 0)
 
-        if bottom and minute % 3 != 0:
-            text = bottom
-        else:
-            text = weather_warning if weather_warning else bottom
+        warning_details = []
+        if isinstance(weather_warning, dict):
+            warning_details = weather_warning.get("details", []) or []
+        elif isinstance(weather_warning, str):
+            if weather_warning:
+                warning_details = [{"text": weather_warning.split("\n"), "name": "警告", "icon": None, "code": "", "subtype": None}]
 
-        if not text:
-            return
         f = self.fonts["weather"]
         content_top = self.L.BOTTOM_TOP + 4
         content_bot = self.L.BOTTOM_BOT - 4
@@ -1114,29 +1222,132 @@ class Renderer:
         zone_h = content_bot - content_top
         max_lines = max(1, zone_h // line_height)
 
-        lines = self._wrap_text(text, f, max_width)
-        if len(lines) > max_lines:
-            lines = lines[:max_lines]
-            if lines:
-                last = lines[-1]
-                while last and self._text_size(last + "…", f)[0] > max_width:
-                    last = last[:-1]
-                if last:
-                    lines[-1] = last + "…"
-                else:
-                    lines.pop()
+        icon_margin = 4
+        icon_size_full = zone_h - icon_margin * 2
+
+        def wrap_into_pages(text, page_max_w):
+            if not text:
+                return [[]]
+            lines = self._wrap_text(text, f, page_max_w)
+            if len(lines) <= max_lines:
+                return [lines]
+            return [lines[i:i + max_lines] for i in range(0, len(lines), max_lines)]
+
+        warning_pages = []
+        n_w = len(warning_details)
+
+        if n_w == 0:
+            pass
+        elif n_w == 1:
+            w = warning_details[0]
+            icons = [w["icon"]] if w.get("icon") else []
+            text = "\n".join((w.get("text", []) or [])[:2])
+            if icons:
+                pmw = max_width - (icon_size_full + 4)
+            else:
+                pmw = max_width
+            for chunk in wrap_into_pages(text, pmw):
+                warning_pages.append((chunk, icons))
+        elif n_w == 2:
+            icons = [w.get("icon") for w in warning_details if w.get("icon")]
+            parts = []
+            for w in warning_details:
+                parts.extend((w.get("text", []) or [])[:2])
+            text = "\n".join(parts)
+            text_x_offset = 2 * icon_size_full + 4 + 8
+            pmw = max_width - text_x_offset + 16
+            for chunk in wrap_into_pages(text, pmw):
+                warning_pages.append((chunk, icons))
+        else:
+            icons = [w.get("icon") for w in warning_details if w.get("icon")]
+            warning_pages.append(([], icons))
+            parts = []
+            for w in warning_details:
+                parts.extend((w.get("text", []) or [])[:2])
+            text = "\n".join(parts)
+            for chunk in wrap_into_pages(text, max_width):
+                warning_pages.append((chunk, []))
+
+        pages = []
+        pages.extend(warning_pages)
+        if flw_warning:
+            for chunk in wrap_into_pages(flw_warning, max_width):
+                pages.append((chunk, []))
+        if bottom:
+            for chunk in wrap_into_pages(bottom, max_width):
+                pages.append((chunk, []))
+
+        if not pages:
+            return
+
+        page_idx = minute % len(pages)
+        lines, icons = pages[page_idx]
+        n_icons = len(icons)
+
+        if n_icons == 0:
+            text_x = 16
+            text_max_w = max_width
+            icon_size = 0
+        elif n_icons == 1:
+            icon_size = icon_size_full
+            text_x = 16 + icon_size + 4
+            text_max_w = max_width - (icon_size + 4)
+        elif n_icons == 2:
+            icon_size = icon_size_full
+            text_x = 16 + 2 * icon_size + 4 + 8
+            text_max_w = max_width - (2 * icon_size + 4 + 8)
+        else:
+            gap = 4
+            icon_size = min(icon_size_full, (max_width - (n_icons - 1) * gap) // n_icons)
+            total_w = n_icons * icon_size + (n_icons - 1) * gap
+            start_x = (self.L.W - total_w) // 2
+            text_x = 16
+            text_max_w = max_width
+
+        if n_icons >= 3 and not lines:
+            icon_y = content_top + (zone_h - icon_size) // 2
+            for i, icon_name in enumerate(icons):
+                ix = start_x + i * (icon_size + gap)
+                self._draw_warning_icon(draw, icon_name, (ix, icon_y), icon_size)
+            return
 
         if not lines:
             return
 
         total_h = line_height * len(lines)
-        y_start = content_top + (zone_h - total_h) // 2
+        y_start = content_top + (zone_h - total_h) // 2 + 6
+
+        max_text_h = line_height * max_lines
+        y_start_max = content_top + (zone_h - max_text_h) // 2 + 6
+        icon_y = y_start_max
+
+        if n_icons == 1:
+            self._draw_warning_icon(draw, icons[0], (16, icon_y), icon_size_full)
+        elif n_icons == 2:
+            icon1_x = 16
+            icon2_x = icon1_x + icon_size_full + 4
+            self._draw_warning_icon(draw, icons[0], (icon1_x, icon_y), icon_size_full)
+            self._draw_warning_icon(draw, icons[1], (icon2_x, icon_y), icon_size_full)
 
         for i, line in enumerate(lines):
             l, top, r, b = f.getbbox(line)
             visual_h = b - top
             y = y_start + i * line_height + (line_height - visual_h) // 2 - top
-            draw.text((16, y), line, font=f, fill=BLACK)
+            draw.text((text_x, y), line, font=f, fill=BLACK)
+
+    def _draw_warning_icon(self, draw, icon_name, pos, size):
+        import os
+        icon_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon")
+        icon_path = os.path.join(icon_dir, icon_name)
+        if not os.path.exists(icon_path):
+            return
+        try:
+            from PIL import Image
+            img = Image.open(icon_path).convert("L")
+            img = img.resize((size, size), Image.LANCZOS)
+            draw._image.paste(img, pos)
+        except Exception as e:
+            print(f"[renderer] 加载图标失败 {icon_name}: {e}")
 
     def draw(self, data):
         img = Image.new("1", (W, H), 1)  # 1 = WHITE in 1-bit mode
