@@ -267,6 +267,18 @@ def api_health():
     return {"ok": True, "ts": int(time.time())}
 
 
+@app.route("/api/time")
+def api_time():
+    """返回服务器当前时间（Asia/Shanghai，UTC+8），供 ESP32 校正 RTC"""
+    import datetime, zoneinfo
+    now_utc = datetime.datetime.now(zoneinfo.ZoneInfo("UTC"))
+    now_local = now_utc.astimezone(zoneinfo.ZoneInfo("Asia/Shanghai"))
+    return {
+        "ts": int(time.time()),
+        "iso": now_local.isoformat(),
+    }
+
+
 @app.route("/api/test_fonts")
 def api_test_fonts():
     """Test font rendering"""

@@ -17,7 +17,6 @@
 import network
 import urequests
 import time
-import ntptime
 from machine import Pin, SPI
 import epaper4in2_V2
 from onewire import OneWire
@@ -27,7 +26,7 @@ import ds18x20
 WIFI_SSID     = "NETGEAR_28A"
 WIFI_PASSWORD = "18005711470"
 SERVER_URL    = "http://192.168.50.180:5000/api/screen"
-NTP_HOST      = "stdtime.gov.hk"
+SERVER_TIME_URL = "http://192.168.50.180:5000/api/time"
 TZ_OFFSET_SEC = 8 * 3600
 
 WIDTH  = 400
@@ -35,7 +34,7 @@ HEIGHT = 300
 BUF_SIZE = WIDTH * HEIGHT // 8
 
 FULL_REFRESH_INTERVAL = 3600
-NTP_SYNC_BEFORE      = 7              # 整点前 7 秒 NTP 同步
+TIME_SYNC_BEFORE     = 7              # 整点前 7 秒从服务器校正时间
 FETCH_LEAD           = 5              # 整点前 5 秒 fetch，让服务端 sleep 5 秒到整点返回
 DISPLAY_BEFORE       = 0.3            # display 启动在整点前 0.3 秒
 HOURLY_FULL_REFRESH  = True          # 整点时强制全刷（避免 partial 残留像素）
@@ -100,19 +99,22 @@ def read_ds18b20_temp(sensor, roms):
         print("[DS18B20] 读取异常: %s" % e)
         return None
 
-# ========== NTP 时间同步 ==========
-def sync_ntp():
-    """同步 RTC 到本地时间（UTC+8）。"""
+# ========== 服务器时间同步 ==========
+def fetch_server_time():
+    """从服务器 /api/time 获取当前 Unix 时间戳（UTC+8）。"""
     try:
-        ntptime.host = NTP_HOST
-        ntptime.settime()
-        t = time.localtime(time.time() + TZ_OFFSET_SEC)
-        print("[NTP] %04d-%02d-%02d %02d:%02d:%02d" %
+        r = urequests.get(SERVER_TIME_URL, timeout=10)
+        import ujson
+        d = ujson.loads(r.content)
+        r.close()
+        ts = d["ts"]
+        t = time.localtime(ts + TZ_OFFSET_SEC)
+        print("[时间] %04d-%02d-%02d %02d:%02d:%02d (from server)" %
               (t[0], t[1], t[2], t[3], t[4], t[5]))
-        return True
+        return ts
     except Exception as e:
-        print("[NTP] 失败: %s" % e)
-        return False
+        print("[时间] 获取失败: %s" % e)
+        return None
 
 # ========== 计算本地时间字符串 ==========
 def local_time_str(ticks):
@@ -173,7 +175,12 @@ def main():
         return
 
     epd = init_epd()
-    sync_ntp()
+
+    # 启动时从服务器获取一次准确时间
+    server_ts = fetch_server_time()
+    if server_ts is None:
+        print("[错误] 无法获取服务器时间，退出")
+        return
 
     ds18_sensor, ds18_roms = init_ds18b20()
 
@@ -181,52 +188,52 @@ def main():
     target_ticks = 0
 
     while True:
-        # ===== 计算下次刷屏目标时刻（整点） =====
-        now = time.time()
-        if target_ticks == 0:
-            # 首次：必须先确保 RTC 准确（启动时 NTP 可能失败）
-            # 检查方法：年 > 2024 才算校准（避免 boot_time 算错）
-            local_check = time.localtime(now)
-            if local_check[0] < 2024:
-                print("[RTC 未校准] 当前 RTC=%d sec, year=%d" % (now, local_check[0]))
-                print("[RTC 未校准] 等待 NTP 同步...")
-                for _ in range(60):  # 最多等 60 秒
-                    time.sleep(2)
-                    if sync_ntp():
-                        now = time.time()
-                        local_check = time.localtime(now)
-                        if local_check[0] >= 2024:
-                            break
+        # ===== 从服务器校正时间 =====
+        server_ts = fetch_server_time()
+        if server_ts is None:
+            print("[警告] 服务器时间获取失败，跳过本次")
+            time.sleep(5)
+            continue
+        now = server_ts
 
+        # ===== 计算下次刷屏目标时刻（对齐整分） =====
+        if target_ticks == 0:
+            # 首次：对齐到下一个整分
             local = time.localtime(now + TZ_OFFSET_SEC)
             wait_sec = 60 - local[5]
             if local[5] == 0:
                 wait_sec = 0
             target_ticks = now + wait_sec
-            print("[首次] 对齐整点 %s，等待 %.1fs" %
+            print("[首次] 对齐整分 %s，等待 %.1fs" %
                   (local_time_str(target_ticks), wait_sec))
         else:
             target_ticks += 60
 
-        # ===== 整点前 NTP 同步 =====
-        if target_ticks - now >= NTP_SYNC_BEFORE + 1:
-            sleep_until(target_ticks - NTP_SYNC_BEFORE)
-            if not sync_ntp():
-                print("[警告] NTP 同步失败，本次跳过整点")
+        # ===== 整点前再次校正时间 =====
+        if target_ticks - now >= TIME_SYNC_BEFORE + 1:
+            sleep_until(target_ticks - TIME_SYNC_BEFORE)
+            server_ts = fetch_server_time()
+            if server_ts is None:
+                print("[警告] 服务器时间获取失败，跳过本次")
                 continue
-            print("[NTP 校准] 当前 RTC = %s" % local_time_str(time.time()))
+            # 用校正后的时间微调 target_ticks
+            drift = server_ts - (target_ticks - 60)
+            if abs(drift) > 5:
+                print("[时间] 校正 %+.1fs" % drift)
+            # 每分钟漂移修正：保持 target_ticks 在未来
+            if drift > 0:
+                target_ticks += int(drift)
 
         # ===== 提前 fetch（让服务端 sleep 到整点返回） =====
-        # 整点前 FETCH_LEAD 秒发起请求
         fetch_at = target_ticks - FETCH_LEAD
-        now = time.time()
+        now = server_ts
         if fetch_at - now > 0:
             sleep_until(fetch_at)
 
         # 客户端时间 = 目标整点对应的本地时间
         target_client_time = local_time_str(target_ticks)
         # 服务端 sleep 时间 = fetch 启动到整点
-        delay = max(0.5, target_ticks - time.time())
+        delay = max(0.5, target_ticks - server_ts)
 
         print("[fetch] client=%s delay=%.1fs target=%s" %
               (target_client_time, delay, local_time_str(target_ticks)))
@@ -236,9 +243,8 @@ def main():
             continue
 
         # ===== 缓存 buf，sleep 到整点前 DISPLAY_BEFORE 秒再 display =====
-        # 此时 RTC 已经接近整点（fetch 耗时让 fetch 完成在 ~整点）
         display_at = target_ticks - DISPLAY_BEFORE
-        now = time.time()
+        now = server_ts
         if display_at - now > 0:
             sleep_until(display_at)
 
@@ -247,7 +253,7 @@ def main():
         is_hourly = (time.localtime(target_ticks + TZ_OFFSET_SEC)[4] == 0)
         force_full = is_hourly or (target_ticks - last_full) > FULL_REFRESH_INTERVAL
         display(epd, buf, force_full=force_full)
-        actual = time.time()
+        actual = server_ts
         drift = actual - target_ticks  # display 完成相对整点的偏差
         if force_full:
             last_full = target_ticks
