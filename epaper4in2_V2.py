@@ -178,6 +178,13 @@ class EPD:
         width = (EPD_WIDTH // 8)
         height = EPD_HEIGHT
 
+        # 切回 full refresh 模式（覆盖 partial 残留的 0x3C/0x21 寄存器状态）
+        # 否则 partial 模式下触发的全刷不会彻底清 ghost
+        self._command(0x21)
+        self._data(bytearray([0x40, 0x00]))
+        self._command(0x3C)
+        self._data(bytearray([0x05]))
+
         # 发送数据到 black RAM (0x24)
         self._command(0x24)
         for j in range(height):
