@@ -34,7 +34,6 @@ HEIGHT = 300
 BUF_SIZE = WIDTH * HEIGHT // 8
 
 FULL_REFRESH_INTERVAL = 3600
-TIME_SYNC_BEFORE     = 7              # 整点前 7 秒从服务器校正时间
 FETCH_LEAD           = 5              # 整点前 5 秒 fetch，让服务端 sleep 5 秒到整点返回
 DISPLAY_BEFORE       = 0.3            # display 启动在整点前 0.3 秒
 HOURLY_FULL_REFRESH  = True          # 整点时强制全刷（避免 partial 残留像素）
@@ -169,14 +168,14 @@ ds18_roms = []
 
 def main():
     global ds18_sensor, ds18_roms
-    print("=== 墨水屏时钟（提前 fetch + 整点 display）===")
+    print("=== 墨水屏时钟（每分钟从服务器拿时间）===")
     if not connect_wifi():
         print("WiFi 连接失败")
         return
 
     epd = init_epd()
 
-    # 启动时从服务器同步一次
+    # 启动时从服务器获取一次准确时间
     server_ts = fetch_server_time()
     if server_ts is None:
         print("[错误] 无法获取服务器时间，退出")
@@ -185,46 +184,46 @@ def main():
     ds18_sensor, ds18_roms = init_ds18b20()
 
     last_full = 0
-    local_ticks = server_ts  # 本地计时器，跟服务器时间同步
     target_ticks = 0
 
     while True:
-        # ===== 计算下次刷屏目标时刻 =====
+        # ===== 每次都从服务器拿时间 =====
+        server_ts = fetch_server_time()
+        if server_ts is None:
+            print("[警告] 服务器时间获取失败，5 秒后重试")
+            time.sleep(5)
+            continue
+
+        # ===== 计算下次刷屏目标时刻（对齐整分） =====
         if target_ticks == 0:
-            local = time.localtime(local_ticks + TZ_OFFSET_SEC)
+            local = time.localtime(server_ts + TZ_OFFSET_SEC)
             wait_sec = 60 - local[5]
             if local[5] == 0:
                 wait_sec = 0
-            target_ticks = local_ticks + wait_sec
+            target_ticks = server_ts + wait_sec
             print("[首次] 对齐整分 %s，等待 %.1fs" %
                   (local_time_str(target_ticks), wait_sec))
         else:
             target_ticks += 60
 
-        # ===== 判断是否整点（需要校准） =====
-        prev_hour = time.localtime(target_ticks - 60 + TZ_OFFSET_SEC)[4]
-        next_hour = time.localtime(target_ticks + TZ_OFFSET_SEC)[4]
-        is_hourly = (prev_hour == 59 and next_hour == 0)
-
-        # ===== 整点前从服务器同步一次 =====
-        if is_hourly and target_ticks - local_ticks >= TIME_SYNC_BEFORE + 1:
-            sleep_until(target_ticks - TIME_SYNC_BEFORE)
-            server_ts = fetch_server_time()
-            if server_ts is not None:
-                drift = server_ts - local_ticks
-                local_ticks = server_ts
-                print("[整点校准] drift=%+.1fs" % drift)
+        # ===== 判断是否整点 =====
+        prev_min = time.localtime(target_ticks - 60 + TZ_OFFSET_SEC)[4]
+        next_min = time.localtime(target_ticks + TZ_OFFSET_SEC)[4]
+        is_hourly = (prev_min == 59 and next_min == 0)
 
         # ===== 提前 fetch（让服务端 sleep 到整点返回） =====
         fetch_at = target_ticks - FETCH_LEAD
-        now = local_ticks
-        if fetch_at - now > 0:
+        if fetch_at - server_ts > 0:
             sleep_until(fetch_at)
+            # 再次确认时间（确保整点精确）
+            server_ts = fetch_server_time()
+            if server_ts is None:
+                continue
 
         # 客户端时间 = 目标整点对应的本地时间
         target_client_time = local_time_str(target_ticks)
-        # 服务端 sleep 时间 = fetch 启动到整点
-        delay = max(0.5, target_ticks - local_ticks)
+        # 服务端 sleep 时间
+        delay = max(0.5, target_ticks - server_ts)
 
         print("[fetch] client=%s delay=%.1fs target=%s" %
               (target_client_time, delay, local_time_str(target_ticks)))
@@ -233,20 +232,10 @@ def main():
             print("拉取失败，保持上一帧")
             continue
 
-        # 本地计时器 +60s
-        local_ticks += 60
-
-        # ===== 缓存 buf，sleep 到整点前 DISPLAY_BEFORE 秒再 display =====
-        display_at = target_ticks - DISPLAY_BEFORE
-        now = local_ticks
-        if display_at - now > 0:
-            sleep_until(display_at)
-
         # ===== display =====
-        # 每小时整点强制全刷（避免 partial 残留 ghost 像素）
         force_full = is_hourly or (target_ticks - last_full) > FULL_REFRESH_INTERVAL
         display(epd, buf, force_full=force_full)
-        drift = local_ticks - target_ticks
+        drift = server_ts - target_ticks
         if force_full:
             last_full = target_ticks
             print("[全刷] 偏差 %.2fs" % drift)
