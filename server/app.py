@@ -28,21 +28,6 @@ WIDTH, HEIGHT = 400, 300
 BUF_SIZE = WIDTH * HEIGHT // 8  # 15000
 
 
-def _apply_delay():
-    """
-    如果请求带了 ?delay=N（秒），服务端 sleep N 秒后再返回。
-    用于 ESP32 提前发起请求，让服务端"等到整点"再渲染。
-    """
-    delay_raw = request.args.get("delay")
-    if delay_raw is None:
-        return
-    try:
-        delay = float(delay_raw)
-    except ValueError:
-        return
-    if delay > 0:
-        time.sleep(delay)
-
 
 # ============================================================
 # 路由
@@ -79,14 +64,14 @@ def api_screen():
         env_temp=25.5 - 现场温度传感器数据
     """
     try:
-        _apply_delay()
+
         from flask import request
         force_refresh = request.args.get("refresh", "0") == "1"
         env_temp = request.args.get("env_temp")
         if env_temp is not None:
             data.ENV_TEMP = float(env_temp)
         print(f"[env_temp] {data.ENV_TEMP}°C")
-        payload = data.collect(force_refresh=force_refresh, client_time=request.args.get("client_time"))
+        payload = data.collect(force_refresh=force_refresh)
         img, _ = _renderer.render(payload)  # (1bit, raw)
         buf = renderer.to_buffer(img)
 
@@ -97,7 +82,7 @@ def api_screen():
             mimetype="application/octet-stream",
             headers={
                 "Cache-Control": "no-store",
-                "X-Render-Time-Ms": str(int(time.time() * 1000) % 100000),
+                "X-Minute": str(payload["now"]["minute"]),
             },
         )
     except Exception as e:
@@ -109,11 +94,11 @@ def api_screen():
 def api_screen_png():
     """PNG 预览：转换后的 400x300 1-bit 图"""
     try:
-        _apply_delay()
+
         env_temp = request.args.get("env_temp")
         if env_temp is not None:
             data.ENV_TEMP = float(env_temp)
-        payload = data.collect(client_time=request.args.get("client_time"))
+        payload = data.collect()
         img, _ = _renderer.render(payload)  # (1bit, raw800)
         png_bytes = renderer.to_png_bytes(img)
         return Response(
@@ -130,8 +115,8 @@ def api_screen_png():
 def api_screen_raw_png():
     """原始设计图：400x300 灰度（用于对比）"""
     try:
-        _apply_delay()
-        payload = data.collect(client_time=request.args.get("client_time"))
+
+        payload = data.collect()
         img_raw = renderer.render_raw(payload)  # 400x300 L 灰度图
         png_bytes = renderer.to_png_bytes(img_raw)
         return Response(
@@ -153,18 +138,16 @@ def api_screen_2x():
     查询参数:
         refresh=1 - 强制刷新天气（用于全刷时）
         env_temp=25.5 - 现场温度传感器数据
-        client_time=2026-06-24T22:30:00 - 用客户端时间替代服务端时间
-        delay=5 - 服务端 sleep N 秒后再返回（用于提前请求模式）
     """
     try:
-        _apply_delay()
+
         from flask import request
         force_refresh = request.args.get("refresh", "0") == "1"
         env_temp = request.args.get("env_temp")
         if env_temp is not None:
             data.ENV_TEMP = float(env_temp)
         print(f"[env_temp] {data.ENV_TEMP}°C")
-        payload = data.collect(force_refresh=force_refresh, client_time=request.args.get("client_time"))
+        payload = data.collect(force_refresh=force_refresh)
         img_1bit, _ = renderer.render_hires(payload)
         buf = renderer.to_buffer(img_1bit)
 
@@ -175,7 +158,7 @@ def api_screen_2x():
             mimetype="application/octet-stream",
             headers={
                 "Cache-Control": "no-store",
-                "X-Render-Time-Ms": str(int(time.time() * 1000) % 100000),
+                "X-Minute": str(payload["now"]["minute"]),
                 "X-Mode": "2x-hires",
             },
         )
@@ -188,11 +171,11 @@ def api_screen_2x():
 def api_screen_2x_png():
     """2x 高分辨率 PNG 预览"""
     try:
-        _apply_delay()
+
         env_temp = request.args.get("env_temp")
         if env_temp is not None:
             data.ENV_TEMP = float(env_temp)
-        payload = data.collect(client_time=request.args.get("client_time"))
+        payload = data.collect()
         img_1bit, img_gray = renderer.render_hires(payload)
         png_bytes = renderer.to_png_bytes(img_gray)
         return Response(
@@ -232,7 +215,7 @@ def api_info():
     env_temp = request.args.get("env_temp")
     if env_temp is not None:
         data.ENV_TEMP = float(env_temp)
-    payload = data.collect(client_time=request.args.get("client_time"))
+    payload = data.collect()
     payload["now"]["datetime"] = payload["now"]["datetime"].isoformat()
     return jsonify(payload)
 
