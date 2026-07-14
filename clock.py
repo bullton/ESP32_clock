@@ -176,7 +176,7 @@ def main():
 
     epd = init_epd()
 
-    # 启动时从服务器获取一次准确时间
+    # 启动时从服务器同步一次
     server_ts = fetch_server_time()
     if server_ts is None:
         print("[错误] 无法获取服务器时间，退出")
@@ -185,55 +185,46 @@ def main():
     ds18_sensor, ds18_roms = init_ds18b20()
 
     last_full = 0
+    local_ticks = server_ts  # 本地计时器，跟服务器时间同步
     target_ticks = 0
 
     while True:
-        # ===== 从服务器校正时间 =====
-        server_ts = fetch_server_time()
-        if server_ts is None:
-            print("[警告] 服务器时间获取失败，跳过本次")
-            time.sleep(5)
-            continue
-        now = server_ts
-
-        # ===== 计算下次刷屏目标时刻（对齐整分） =====
+        # ===== 计算下次刷屏目标时刻 =====
         if target_ticks == 0:
-            # 首次：对齐到下一个整分
-            local = time.localtime(now + TZ_OFFSET_SEC)
+            local = time.localtime(local_ticks + TZ_OFFSET_SEC)
             wait_sec = 60 - local[5]
             if local[5] == 0:
                 wait_sec = 0
-            target_ticks = now + wait_sec
+            target_ticks = local_ticks + wait_sec
             print("[首次] 对齐整分 %s，等待 %.1fs" %
                   (local_time_str(target_ticks), wait_sec))
         else:
             target_ticks += 60
 
-        # ===== 整点前再次校正时间 =====
-        if target_ticks - now >= TIME_SYNC_BEFORE + 1:
+        # ===== 判断是否整点（需要校准） =====
+        prev_hour = time.localtime(target_ticks - 60 + TZ_OFFSET_SEC)[4]
+        next_hour = time.localtime(target_ticks + TZ_OFFSET_SEC)[4]
+        is_hourly = (prev_hour == 59 and next_hour == 0)
+
+        # ===== 整点前从服务器同步一次 =====
+        if is_hourly and target_ticks - local_ticks >= TIME_SYNC_BEFORE + 1:
             sleep_until(target_ticks - TIME_SYNC_BEFORE)
             server_ts = fetch_server_time()
-            if server_ts is None:
-                print("[警告] 服务器时间获取失败，跳过本次")
-                continue
-            # 用校正后的时间微调 target_ticks
-            drift = server_ts - (target_ticks - 60)
-            if abs(drift) > 5:
-                print("[时间] 校正 %+.1fs" % drift)
-            # 每分钟漂移修正：保持 target_ticks 在未来
-            if drift > 0:
-                target_ticks += int(drift)
+            if server_ts is not None:
+                drift = server_ts - local_ticks
+                local_ticks = server_ts
+                print("[整点校准] drift=%+.1fs" % drift)
 
         # ===== 提前 fetch（让服务端 sleep 到整点返回） =====
         fetch_at = target_ticks - FETCH_LEAD
-        now = server_ts
+        now = local_ticks
         if fetch_at - now > 0:
             sleep_until(fetch_at)
 
         # 客户端时间 = 目标整点对应的本地时间
         target_client_time = local_time_str(target_ticks)
         # 服务端 sleep 时间 = fetch 启动到整点
-        delay = max(0.5, target_ticks - server_ts)
+        delay = max(0.5, target_ticks - local_ticks)
 
         print("[fetch] client=%s delay=%.1fs target=%s" %
               (target_client_time, delay, local_time_str(target_ticks)))
@@ -242,19 +233,20 @@ def main():
             print("拉取失败，保持上一帧")
             continue
 
+        # 本地计时器 +60s
+        local_ticks += 60
+
         # ===== 缓存 buf，sleep 到整点前 DISPLAY_BEFORE 秒再 display =====
         display_at = target_ticks - DISPLAY_BEFORE
-        now = server_ts
+        now = local_ticks
         if display_at - now > 0:
             sleep_until(display_at)
 
         # ===== display =====
         # 每小时整点强制全刷（避免 partial 残留 ghost 像素）
-        is_hourly = (time.localtime(target_ticks + TZ_OFFSET_SEC)[4] == 0)
         force_full = is_hourly or (target_ticks - last_full) > FULL_REFRESH_INTERVAL
         display(epd, buf, force_full=force_full)
-        actual = server_ts
-        drift = actual - target_ticks  # display 完成相对整点的偏差
+        drift = local_ticks - target_ticks
         if force_full:
             last_full = target_ticks
             print("[全刷] 偏差 %.2fs" % drift)
