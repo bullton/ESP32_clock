@@ -23,7 +23,6 @@ HEIGHT = 300
 BUF_SIZE = WIDTH * HEIGHT // 8
 
 FULL_REFRESH_INTERVAL = 3600    # 距离上次全刷超过此秒数则全刷
-FETCH_INTERVAL        = 55      # 每次 fetch 间隔（秒），略短于 60s 留出处理时间
 
 # ========== 硬件初始化 ==========
 def init_epd():
@@ -90,14 +89,15 @@ def fetch_screen():
         r = urequests.get(url, timeout=15)
         buf = r.content
         minute = int(r.headers.get("X-Minute", "-1"))
+        next_in = int(r.headers.get("X-Next-In", "55"))
         r.close()
         if len(buf) != BUF_SIZE:
             print("长度 %d != %d" % (len(buf), BUF_SIZE))
-            return None, -1
-        return buf, minute
+            return None, -1, 55
+        return buf, minute, next_in
     except Exception as e:
         print("拉取失败: %s" % e)
-        return None, -1
+        return None, -1, 55
 
 # ========== 刷屏 ==========
 def display_screen(epd, buf, force_full=False):
@@ -124,7 +124,7 @@ def main():
     last_minute = -1
 
     while True:
-        buf, minute = fetch_screen()
+        buf, minute, next_in = fetch_screen()
         if buf is None:
             time.sleep(5)
             continue
@@ -143,8 +143,9 @@ def main():
         else:
             print("[局刷] minute=%d" % minute)
 
-        # 等待下次 fetch
-        time.sleep(FETCH_INTERVAL)
+        # 按服务器指定的时间间隔等待
+        print("[等待] %d 秒后下次请求" % next_in)
+        time.sleep(next_in)
 
 if __name__ == '__main__':
     main()
