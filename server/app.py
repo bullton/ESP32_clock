@@ -83,6 +83,7 @@ def api_screen():
             headers={
                 "Cache-Control": "no-store",
                 "X-Minute": str(payload["now"]["minute"]),
+                "X-Next-In": str(max(45, min(55, 100 - int(time.time()) % 60 if int(time.time()) % 60 >= 10 else 110 - int(time.time()) % 60))),
             },
         )
     except Exception as e:
@@ -159,6 +160,7 @@ def api_screen_2x():
             headers={
                 "Cache-Control": "no-store",
                 "X-Minute": str(payload["now"]["minute"]),
+                "X-Next-In": str(max(45, min(55, 100 - int(time.time()) % 60 if int(time.time()) % 60 >= 10 else 110 - int(time.time()) % 60))),
                 "X-Mode": "2x-hires",
             },
         )
