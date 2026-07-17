@@ -1,6 +1,6 @@
-# clock.py - 墨水屏时钟（服务端整点同步模式）
-# 架构：服务端等待到整点返回，X-Next-Request-In 告知下次请求秒数
-# ESP32 只管 sleep 那个秒数，无需校准
+# clock.py - 墨水屏时钟（服务端渲染模式）
+# 架构：服务端返回 15000 字节 MONO_HLSB 位图 → ESP32 直接刷屏
+# 服务器返回什么时间就显示什么时间，ESP32 不做任何时间同步
 #
 # GPIO（ESP32-S3）：
 #   SCK=14, MOSI=42, CS=41, DC=2, RST=4, BUSY=5
@@ -8,7 +8,6 @@
 import network
 import urequests
 import time
-import ntptime
 from machine import Pin, SPI
 import epaper4in2_V2
 from onewire import OneWire
@@ -18,16 +17,12 @@ import ds18x20
 WIFI_SSID     = "NETGEAR_28A"
 WIFI_PASSWORD = "18005711470"
 SERVER_URL    = "http://192.168.50.180:5000/api/screen"
-NTP_HOST      = "stdtime.gov.hk"
-TZ_OFFSET_SEC = 8 * 3600
 
 WIDTH  = 400
 HEIGHT = 300
 BUF_SIZE = WIDTH * HEIGHT // 8
 
 FULL_REFRESH_INTERVAL = 3600
-NTP_SYNC_INTERVAL    = 300
-INITIAL_WAIT        = 50
 
 # ========== 硬件初始化 ==========
 def init_epd():
@@ -83,19 +78,6 @@ def read_ds18b20_temp(sensor, roms):
         print("[DS18B20] 读取异常: %s" % e)
         return None
 
-# ========== NTP 时间同步 ==========
-def sync_ntp():
-    try:
-        ntptime.host = NTP_HOST
-        ntptime.settime()
-        t = time.localtime(time.time() + TZ_OFFSET_SEC)
-        print("[NTP] %04d-%02d-%02d %02d:%02d:%02d" %
-              (t[0], t[1], t[2], t[3], t[4], t[5]))
-        return True
-    except Exception as e:
-        print("[NTP] 失败: %s" % e)
-        return False
-
 # ========== 拉取位图 ==========
 def fetch_bitmap():
     try:
@@ -139,27 +121,19 @@ ds18_roms = []
 
 def main():
     global ds18_sensor, ds18_roms
-    print("=== 墨水屏时钟（服务端整点同步）===")
+    print("=== 墨水屏时钟 ===")
     if not connect_wifi():
         print("WiFi 连接失败")
         return
 
     epd = init_epd()
-    sync_ntp()
-
     ds18_sensor, ds18_roms = init_ds18b20()
 
     last_full = 0
-    last_ntp = 0
-    next_interval = INITIAL_WAIT
+    next_interval = 50
     buf = None
 
     while True:
-        now = time.time()
-        if now - last_ntp > NTP_SYNC_INTERVAL:
-            if sync_ntp():
-                last_ntp = now
-
         print("[等待] %.1fs 后请求..." % next_interval)
         sleep_sec(next_interval)
 
@@ -168,11 +142,10 @@ def main():
             next_interval = 10
             continue
 
-        local = time.localtime(time.time() + TZ_OFFSET_SEC)
-        is_hourly = (local[4] == 0)
-        force_full = is_hourly or (time.time() - last_full) > FULL_REFRESH_INTERVAL
-        display(epd, buf, force_full=force_full)
-        if force_full:
+        display(epd, buf, force_full=False)
+        if (time.time() - last_full) > FULL_REFRESH_INTERVAL:
+            epd.init()
+            epd.display_frame(buf)
             last_full = time.time()
             print("[全刷] 完成")
 
