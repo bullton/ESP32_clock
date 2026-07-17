@@ -28,6 +28,25 @@ WIDTH, HEIGHT = 400, 300
 BUF_SIZE = WIDTH * HEIGHT // 8  # 15000
 
 
+def _wait_until_next_minute():
+    """等待到下一分钟整点，返回下次请求间隔秒数。"""
+    now = time.time()
+    local = time.localtime(now)
+    sec = local[5]
+    BASELINE = 50
+
+    if sec < BASELINE:
+        wait_sec = 0
+        next_interval = BASELINE - sec
+    else:
+        wait_sec = 60 - sec
+        next_interval = BASELINE
+
+    if wait_sec > 0:
+        time.sleep(wait_sec)
+
+    return next_interval
+
 
 # ============================================================
 # 路由
@@ -64,8 +83,7 @@ def api_screen():
         env_temp=25.5 - 现场温度传感器数据
     """
     try:
-
-        from flask import request
+        next_interval = _wait_until_next_minute()
         force_refresh = request.args.get("refresh", "0") == "1"
         env_temp = request.args.get("env_temp")
         if env_temp is not None:
@@ -82,8 +100,7 @@ def api_screen():
             mimetype="application/octet-stream",
             headers={
                 "Cache-Control": "no-store",
-                "X-Minute": str(payload["now"]["minute"]),
-                "X-Second": str(int(time.time()) % 60),
+                "X-Next-Request-In": str(next_interval),
             },
         )
     except Exception as e:
@@ -141,8 +158,7 @@ def api_screen_2x():
         env_temp=25.5 - 现场温度传感器数据
     """
     try:
-
-        from flask import request
+        next_interval = _wait_until_next_minute()
         force_refresh = request.args.get("refresh", "0") == "1"
         env_temp = request.args.get("env_temp")
         if env_temp is not None:
@@ -159,8 +175,7 @@ def api_screen_2x():
             mimetype="application/octet-stream",
             headers={
                 "Cache-Control": "no-store",
-                "X-Minute": str(payload["now"]["minute"]),
-                "X-Second": str(int(time.time()) % 60),
+                "X-Next-Request-In": str(next_interval),
                 "X-Mode": "2x-hires",
             },
         )

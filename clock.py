@@ -1,6 +1,6 @@
-# clock.py - 墨水屏时钟（服务端渲染模式）
-# 架构：每分钟请求 /api/screen → 服务器用自己时间渲染 → ESP32 直接刷屏
-# 动态休眠校准 (DSC)：根据服务器时间动态计算休眠时长，自动收敛到整分刷新
+# clock.py - 墨水屏时钟（服务端整点同步模式）
+# 架构：服务端等待到整点返回，X-Next-Request-In 告知下次请求秒数
+# ESP32 只管 sleep 那个秒数，无需校准
 #
 # GPIO（ESP32-S3）：
 #   SCK=14, MOSI=42, CS=41, DC=2, RST=4, BUSY=5
@@ -8,6 +8,7 @@
 import network
 import urequests
 import time
+import ntptime
 from machine import Pin, SPI
 import epaper4in2_V2
 from onewire import OneWire
@@ -17,15 +18,16 @@ import ds18x20
 WIFI_SSID     = "NETGEAR_28A"
 WIFI_PASSWORD = "18005711470"
 SERVER_URL    = "http://192.168.50.180:5000/api/screen"
+NTP_HOST      = "stdtime.gov.hk"
+TZ_OFFSET_SEC = 8 * 3600
 
 WIDTH  = 400
 HEIGHT = 300
 BUF_SIZE = WIDTH * HEIGHT // 8
 
-FULL_REFRESH_INTERVAL = 3600    # 距离上次全刷超过此秒数则全刷
-T_OVERHEAD    = 3.5            # 联网 + 刷屏预估耗时（秒）
-K_MIN = 0.5
-K_MAX = 1.5
+FULL_REFRESH_INTERVAL = 3600
+NTP_SYNC_INTERVAL    = 300
+INITIAL_WAIT        = 50
 
 # ========== 硬件初始化 ==========
 def init_epd():
@@ -81,9 +83,21 @@ def read_ds18b20_temp(sensor, roms):
         print("[DS18B20] 读取异常: %s" % e)
         return None
 
-# ========== 拉取屏幕内容 ==========
-def fetch_screen():
-    """从服务器获取当前分钟的屏幕内容。返回 (buf, minute, second)。"""
+# ========== NTP 时间同步 ==========
+def sync_ntp():
+    try:
+        ntptime.host = NTP_HOST
+        ntptime.settime()
+        t = time.localtime(time.time() + TZ_OFFSET_SEC)
+        print("[NTP] %04d-%02d-%02d %02d:%02d:%02d" %
+              (t[0], t[1], t[2], t[3], t[4], t[5]))
+        return True
+    except Exception as e:
+        print("[NTP] 失败: %s" % e)
+        return False
+
+# ========== 拉取位图 ==========
+def fetch_bitmap():
     try:
         env_temp = read_ds18b20_temp(ds18_sensor, ds18_roms)
         if env_temp is None:
@@ -91,23 +105,33 @@ def fetch_screen():
         url = SERVER_URL + "?env_temp=%.1f" % env_temp
         r = urequests.get(url, timeout=15)
         buf = r.content
-        minute = int(r.headers.get("X-Minute", "-1"))
-        second = int(r.headers.get("X-Second", "-1"))
+        next_interval = int(r.headers.get("X-Next-Request-In", "50"))
         r.close()
         if len(buf) != BUF_SIZE:
             print("长度 %d != %d" % (len(buf), BUF_SIZE))
-            return None, -1, -1
-        return buf, minute, second
+            return None, None
+        return buf, next_interval
     except Exception as e:
         print("拉取失败: %s" % e)
-        return None, -1, -1
+        return None, None
 
 # ========== 刷屏 ==========
-def display_screen(epd, buf, force_full=False):
+def display(epd, buf, force_full=False):
     if force_full:
+        epd.init()
         epd.display_frame(buf)
     else:
         epd.partial_display(buf, 0, 0, WIDTH, HEIGHT)
+
+# ========== 精确 sleep ==========
+def sleep_sec(s):
+    while s > 0:
+        if s > 1:
+            time.sleep(s - 0.1)
+            s = 0.1
+        else:
+            time.sleep(s)
+            s = 0
 
 # ========== 主循环 ==========
 ds18_sensor = None
@@ -115,77 +139,42 @@ ds18_roms = []
 
 def main():
     global ds18_sensor, ds18_roms
-    print("=== 墨水屏时钟（动态休眠校准）===")
+    print("=== 墨水屏时钟（服务端整点同步）===")
     if not connect_wifi():
         print("WiFi 连接失败")
         return
 
     epd = init_epd()
+    sync_ntp()
+
     ds18_sensor, ds18_roms = init_ds18b20()
 
     last_full = 0
-    last_minute = -1
-    k_cal = 1.0  # 休眠补偿系数
+    last_ntp = 0
+    next_interval = INITIAL_WAIT
+    buf = None
 
-    # ===== 首次 fetch（无前置 sleep，直接拿当前分钟数据） =====
-    buf, minute, second = fetch_screen()
-    if buf is None:
-        print("[错误] 无法获取数据，退出")
-        return
-    last_minute = minute
-    display_screen(epd, buf, force_full=False)
-    print("[首次] minute=%d second=%d" % (minute, second))
-
-    # ===== 主循环：sleep → fetch → display → 校准 =====
     while True:
-        # DSC：计算距下一分钟的理论秒数
-        T_target = 60 - second
-        T_real = (T_target - T_OVERHEAD) * k_cal
-        if T_real < 1:
-            T_real = 1
+        now = time.time()
+        if now - last_ntp > NTP_SYNC_INTERVAL:
+            if sync_ntp():
+                last_ntp = now
 
-        print("[DSC] T_target=%.1f K=%.3f sleep=%.1f" % (T_target, k_cal, T_real))
-        time.sleep(T_real)
+        print("[等待] %.1fs 后请求..." % next_interval)
+        sleep_sec(next_interval)
 
-        # fetch（此时应接近整分）
-        buf, minute, second = fetch_screen()
+        buf, next_interval = fetch_bitmap()
         if buf is None:
-            time.sleep(5)
+            next_interval = 10
             continue
 
-        # 检测整点跨越
-        is_hourly = (last_minute == 59 and minute == 0)
-
-        # 判断是否需要全刷
+        local = time.localtime(time.time() + TZ_OFFSET_SEC)
+        is_hourly = (local[4] == 0)
         force_full = is_hourly or (time.time() - last_full) > FULL_REFRESH_INTERVAL
-
-        # display
-        display_screen(epd, buf, force_full=force_full)
+        display(epd, buf, force_full=force_full)
         if force_full:
             last_full = time.time()
-            print("[全刷] minute=%d" % minute)
-        else:
-            print("[局刷] minute=%d" % minute)
-
-        # ===== DSC 误差校准 =====
-        # 预期收到 last_minute + 1
-        expected_minute = (last_minute + 1) % 60
-        # 圆环误差：late 为正(1~30)，early 为负(-59~-1)
-        error = (minute - expected_minute) % 60
-        if error > 30:
-            error -= 60
-
-        # 调整 K_cal
-        if error > 0:
-            k_cal *= 0.9  # 睡晚了，下次少睡
-        elif error < 0:
-            k_cal *= 1.1  # 睡早了，下次多睡
-        k_cal = max(K_MIN, min(K_MAX, k_cal))
-
-        print("[DSC] got minute=%d expected=%d error=%+d K=%.3f" % (minute, expected_minute, error, k_cal))
-
-        # 更新 last_minute
-        last_minute = minute
+            print("[全刷] 完成")
 
 if __name__ == '__main__':
     main()
