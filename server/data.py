@@ -435,7 +435,59 @@ def countdowns(limit=3):
 
 
 # ============================================================
-# 5. 天气缓存（减少 API 请求）
+# 5. 下次火箭发射
+# ============================================================
+
+_launch_cache = None
+_launch_cache_time = 0
+LAUNCH_CACHE_TTL = 3600  # 1 小时
+
+_COUNTRY_MAP = {
+    "USA": "美国", "CHN": "中国", "RUS": "俄罗斯",
+    "JPN": "日本", "IND": "印度", "KOR": "韩国",
+    "NZL": "新西兰", "AUS": "澳大利亚", "GBR": "英国",
+    "FRA": "法国", "DEU": "德国", "BRA": "巴西",
+    "IRN": "伊朗", "PRK": "朝鲜", "PRK": "朝鲜",
+    "ISR": "以色列", "ARE": "阿联酋", "KAZ": "哈萨克斯坦",
+}
+
+def _format_launch_time(net_iso):
+    """把 2026-10-15T23:57:05Z 转成 2026/10/15 23:57:05 HKT"""
+    try:
+        dt = datetime.datetime.fromisoformat(net_iso.replace("Z", "+00:00"))
+        hkt = dt.astimezone(zoneinfo.ZoneInfo("Asia/Hong_Kong"))
+        return hkt.strftime("%Y/%m/%d %H:%M:%S")
+    except:
+        return net_iso
+
+def _get_next_launch(force_refresh=False):
+    """获取下次火箭发射信息，带缓存"""
+    global _launch_cache, _launch_cache_time
+    now = time.time()
+    if force_refresh or _launch_cache is None or (now - _launch_cache_time) > LAUNCH_CACHE_TTL:
+        try:
+            r = requests.get("https://launch.choice-hongkong.com/api/ll/next", timeout=10)
+            d = r.json()
+            r.close()
+            name = d.get("name", "未知")
+            net = d.get("net", "")
+            country_code = d.get("location", {}).get("country_code", "")
+            country = _COUNTRY_MAP.get(country_code, country_code)
+            launch_time = _format_launch_time(net) if net else "未知"
+            _launch_cache = {
+                "text": "即将发射：%s，发射时间：%s，国家：%s" % (name, launch_time, country),
+            }
+            _launch_cache_time = now
+            print("[火箭] 刷新缓存 (force=%s)" % force_refresh)
+        except Exception as e:
+            print("[火箭] 获取失败: %s" % e)
+            _launch_cache = {"text": ""}
+            _launch_cache_time = now
+    return _launch_cache
+
+
+# ============================================================
+# 6. 天气缓存（减少 API 请求）
 # ============================================================
 
 _weather_cache = None
@@ -646,6 +698,9 @@ def _parse_client_time(client_time):
 def collect(force_refresh=False, client_time=None, rssi=None):
     weather = _get_weather(force_refresh)
     bottom_custom = load_bottom_content()
+    launch = _get_next_launch(force_refresh)
+    if launch.get("text"):
+        bottom_custom = launch["text"] + ("\n" + bottom_custom if bottom_custom else "")
     hko_warning = get_hko_warning(force_refresh)
     flw_warning = get_flw_warning(force_refresh)
     return {
