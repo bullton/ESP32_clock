@@ -26,27 +26,25 @@ cp -rf server/icon/. icon/
 cp -rf server/static/. static/
 cp -rf server/fonts/. fonts/
 
-# 重启服务：先按 5000 端口找占用进程，再用锚定模式兜底
-port_pid() { ss -lptnH 'sport = :5000' 2>/dev/null | grep -o 'pid=[0-9]*' | head -n1 | cut -d= -f2; }
-PID="$(port_pid)"
-if [ -n "$PID" ]; then
-  kill "$PID" 2>/dev/null || true
-  for _ in $(seq 1 10); do
-    [ -z "$(port_pid)" ] && break
-    sleep 1
-  done
-  [ -n "$(port_pid)" ] && kill -9 "$PID" 2>/dev/null || true
-fi
-pkill -f '^/usr/bin/python3 app\.py$' 2>/dev/null || true
-sleep 1
+# 重启服务
+# 注意：本机 clock_server 由 PM2 托管（pm2 list 中 name=clock_server），
+# 不要用 pkill —— 进程被杀了 PM2 会立刻拉起，和手动启动的实例抢 5000 端口。
 rm -rf __pycache__
-nohup python3 app.py >> server.log 2>&1 &
+
+PM2_BIN="$(command -v pm2 || echo /home/bullton/.npm-global/bin/pm2)"
+if "$PM2_BIN" describe clock_server >/dev/null 2>&1; then
+  "$PM2_BIN" restart clock_server --update-env >/dev/null
+  WHO="PM2 clock_server"
+else
+  nohup python3 app.py >> server.log 2>&1 &
+  WHO="nohup python3 app.py"
+fi
 
 sleep 3
-if [ -n "$(port_pid)" ]; then
-  echo "Deployed at $(date) —— 服务已监听 5000 (pid $(port_pid))"
+if curl -fsS --max-time 5 http://127.0.0.1:5000/api/health >/dev/null; then
+  echo "Deployed at $(date) —— $WHO 已重启，/api/health 正常"
 else
   echo "启动失败，最近日志："
-  tail -n 20 server.log
+  "$PM2_BIN" logs clock_server --lines 20 --nostream 2>/dev/null || tail -n 20 server.log
   exit 1
 fi
