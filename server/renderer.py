@@ -215,6 +215,42 @@ def get_mono(font_path, size_px, aa=0, threshold=0.5):
 
 
 # ============================================================
+# 多行文本纵向排布（字面更高的粗体自动压缩，保证不越界）
+# ============================================================
+
+def _layout_rows(heights, font, zone_top, zone_bot, bbox_top, margin=8, gap=3, pad=1):
+    """返回 (每行绘制 y, 实际行高, 行距)。空间足够时行为与旧版完全一致。"""
+    def place(hs, g, top):
+        tops, y = [], top
+        for h in hs:
+            tops.append(y - bbox_top)
+            y += h + g
+        return tops, y - g
+
+    tops, bottom = place(heights, gap, zone_top + margin)
+    if bottom <= zone_bot - pad:
+        return tops, list(heights), gap
+
+    hs = [min(h, font.size + 1) for h in heights]
+    tops, bottom = place(hs, gap, zone_top + margin)
+    if bottom <= zone_bot - pad:
+        return tops, hs, gap
+
+    avail = (zone_bot - pad) - (zone_top + margin)
+    total = sum(hs)
+    if total <= 0:
+        return tops, hs, gap
+    scale = min(1.0, avail / float(total))
+    hs = [max(1, int(round(h * scale))) for h in hs]
+    while gap > 0 and sum(hs) + gap * (len(hs) - 1) > avail:
+        gap -= 1
+    total = sum(hs) + gap * (len(hs) - 1)
+    top = zone_top + margin + max(0, (avail - total) // 2)
+    tops, _ = place(hs, gap, top)
+    return tops, hs, gap
+
+
+# ============================================================
 # 字体（按优先级找高质量字体）
 # ============================================================
 
@@ -696,8 +732,6 @@ class Renderer2x:
 
         l, bbox_top, r, b = ImageDraw.Draw(Image.new("1", (1, 1))).textbbox((0, 0), "温", font=f_w)
         margin = 4
-        row_gap = 2
-        row1_y = zone_top + margin - bbox_top
 
         row1_str = f'实时温度：{env_temp:.1f}°'
         row2_str = f'体感温度：{feels_like}°'
@@ -705,15 +739,11 @@ class Renderer2x:
         row4_str = f'风向风力：{wind_str}'
         row5_str = f'气压湿度：{pressure_str} / {humidity_str}'
 
-        _, h1 = self._text_size(row1_str, f_w)
-        row2_y = row1_y + h1 + row_gap
-        _, h2 = self._text_size(row2_str, f_w)
-        row3_y = row2_y + h2 + row_gap
-        _, h3 = self._text_size(row3_str, f_w)
-        row4_y = row3_y + h3 + row_gap
-        _, h4 = self._text_size(row4_str, f_w)
-        row5_y = row4_y + h4 + row_gap
-        _, h5 = self._text_size(row5_str, f_w)
+        rows = [row1_str, row2_str, row3_str, row4_str, row5_str]
+        heights = [self._text_size(s, f_w)[1] for s in rows]
+        tops, heights, row_gap = _layout_rows(heights, f_w, zone_top, zone_bot, bbox_top, margin=margin, gap=2)
+        row1_y, row2_y, row3_y, row4_y, row5_y = tops
+        h1, h2, h3, h4, h5 = heights
 
         col_x1 = self.L.WEATHER_X1 + 8
         col_x2 = self.L.W - self.L.M - 8
@@ -1180,8 +1210,6 @@ class Renderer:
 
         l, bbox_top, r, b = ImageDraw.Draw(Image.new("1", (1, 1))).textbbox((0, 0), "温", font=f_w)
         margin = 8
-        row_gap = 3
-        row1_y = zone_top + margin - bbox_top
 
         row1_str = f'实时温度：{env_temp:.1f}°'
         row2_str = f'体感温度：{feels_like}°'
@@ -1189,15 +1217,11 @@ class Renderer:
         row4_str = f'风向风力：{wind_str}'
         row5_str = f'气压湿度：{pressure_str} / {humidity_str}'
 
-        _, h1 = self._text_size(row1_str, f_w)
-        row2_y = row1_y + h1 + row_gap
-        _, h2 = self._text_size(row2_str, f_w)
-        row3_y = row2_y + h2 + row_gap
-        _, h3 = self._text_size(row3_str, f_w)
-        row4_y = row3_y + h3 + row_gap
-        _, h4 = self._text_size(row4_str, f_w)
-        row5_y = row4_y + h4 + row_gap
-        _, h5 = self._text_size(row5_str, f_w)
+        rows = [row1_str, row2_str, row3_str, row4_str, row5_str]
+        heights = [self._text_size(s, f_w)[1] for s in rows]
+        tops, heights, row_gap = _layout_rows(heights, f_w, zone_top, zone_bot, bbox_top, margin=margin, gap=3)
+        row1_y, row2_y, row3_y, row4_y, row5_y = tops
+        h1, h2, h3, h4, h5 = heights
 
         col_x1 = self.L.WEATHER_X1 + 8
         col_x2 = self.L.W - self.L.M - 8
