@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>控制台 · 墨水屏时钟</title>
+<link rel="preload" href="/static/fonts/Unbounded-Medium.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="stylesheet" href="/static/css/console.css">
+</head>
+<body>
+
+<div class="app">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">12<span class="brand-colon">:</span>34</span>
+      <span class="brand-text">
+        <strong>墨水屏</strong>
+        <span>控制台</span>
+      </span>
+    </div>
+
+    <nav class="nav" aria-label="主导航">
+      <a class="nav-item" href="#overview" data-view="overview" aria-current="page">
+        <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        <span>概览</span>
+      </a>
+      <a class="nav-item" href="#screen" data-view="screen">
+        <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="1.5"/><path d="M8 20.5h8M12 17v3.5"/></svg>
+        <span>画面</span>
+      </a>
+      <a class="nav-item" href="#content" data-view="content">
+        <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
+        <span>内容</span>
+      </a>
+      <a class="nav-item" href="#system" data-view="system">
+        <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+        <span>系统</span>
+      </a>
+      <a class="nav-item" href="#account" data-view="account">
+        <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.4 3.8-5 7-5s5.8 1.6 7 5"/></svg>
+        <span>账号</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-foot">
+      <p class="side-status" id="side-status">
+        <span class="dot" id="side-dot" aria-hidden="true"></span>
+        <span id="side-status-text">连接中…</span>
+      </p>
+      <p class="side-clock" id="side-clock">--:--</p>
+      <form method="post" action="/logout">
+        <button type="submit" class="btn btn-ghost btn-block">退出登录</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+
+    <header class="page-head">
+      <div class="page-head-text">
+        <p class="eyebrow" id="page-eyebrow">墨水屏时钟</p>
+        <h1 id="page-title">概览</h1>
+        <p class="page-sub" id="page-sub">设备与服务状态一览</p>
+      </div>
+      <div class="head-meta">
+        <span class="meta-chip">
+          <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1.5"/></svg>
+          400 × 300 · 1-bit
+        </span>
+        <span class="meta-chip">
+          <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+          <span id="head-refresh">下次刷新 --</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- ============ 概览 ============ -->
+    <section class="view" id="view-overview" data-view="overview">
+      <div class="grid-2">
+
+        <article class="card">
+          <div class="card-head">
+            <h2>当前画面</h2>
+            <button type="button" class="btn btn-small" id="ov-refresh">
+              <svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v4h-4"/></svg>
+              刷新
+            </button>
+          </div>
+          <div class="screen-frame screen-frame-wide">
+            <img id="ov-screen" src="/api/screen.png" width="400" height="300" alt="墨水屏当前画面">
+          </div>
+          <p class="card-foot" id="ov-screen-meta">等待首次渲染…</p>
+        </article>
+
+        <div class="stack">
+          <article class="card">
+            <div class="card-head"><h2>运行状态</h2></div>
+            <dl class="stat-list">
+              <div class="stat-row">
+                <dt>服务</dt>
+                <dd><span class="badge badge-ok" id="ov-service">检测中</span></dd>
+              </div>
+              <div class="stat-row">
+                <dt>天气数据</dt>
+                <dd id="ov-weather">—</dd>
+              </div>
+              <div class="stat-row">
+                <dt>气象警告</dt>
+                <dd id="ov-warning">—</dd>
+              </div>
+              <div class="stat-row">
+                <dt>下次发射</dt>
+                <dd id="ov-launch">—</dd>
+              </div>
+              <div class="stat-row">
+                <dt>数据源</dt>
+                <dd id="ov-source">—</dd>
+              </div>
+              <div class="stat-row">
+                <dt>刷新时间</dt>
+                <dd id="ov-updated">—</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article class="card">
+            <div class="card-head"><h2>常用操作</h2></div>
+            <div class="action-row">
+              <button type="button" class="btn btn-primary" data-goto="content">编辑底栏文本</button>
+              <button type="button" class="btn" data-goto="screen">打开画面预览</button>
+              <button type="button" class="btn" data-goto="system">查看接口</button>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 画面 ============ -->
+    <section class="view" id="view-screen" data-view="screen" hidden>
+      <div class="toolbar">
+        <div class="segmented" role="group" aria-label="查看模式">
+          <button type="button" data-mode="preview" aria-pressed="true">预览</button>
+          <button type="button" data-mode="compare" aria-pressed="false">对比</button>
+          <button type="button" data-mode="pixel" aria-pressed="false">像素</button>
+          <button type="button" data-mode="layout" aria-pressed="false">布局</button>
+        </div>
+        <div class="toolbar-right">
+          <button type="button" class="btn btn-small" id="scr-auto" aria-pressed="true">自动刷新：开</button>
+          <button type="button" class="btn btn-small" id="scr-zoom" aria-pressed="false">放大 1.5×</button>
+          <button type="button" class="btn btn-small" id="scr-refresh">立即刷新</button>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="mode-panel" id="mode-preview">
+          <div class="screen-frame" id="scr-frame">
+            <img id="scr-img" src="/api/screen.png" width="400" height="300" alt="墨水屏画面">
+            <div class="screen-overlay" id="scr-overlay" hidden></div>
+          </div>
+        </div>
+
+        <div class="mode-panel" id="mode-compare" hidden>
+          <div class="compare-grid">
+            <figure>
+              <div class="screen-frame"><img id="cmp-raw" src="/api/screen_raw.png" width="400" height="300" alt="1:1 灰度原始渲染"></div>
+              <figcaption>1:1 灰度原始</figcaption>
+            </figure>
+            <figure>
+              <div class="screen-frame"><img id="cmp-2x" src="/api/screen_2x.png" width="400" height="300" alt="2x 超采样渲染"></div>
+              <figcaption>2× 超采样</figcaption>
+            </figure>
+            <figure>
+              <div class="screen-frame"><img id="cmp-epd" src="/api/screen.png" width="400" height="300" alt="1-bit 墨水屏输出"></div>
+              <figcaption>1-bit 输出</figcaption>
+            </figure>
+          </div>
+        </div>
+
+        <div class="mode-panel" id="mode-pixel" hidden>
+          <div class="pixel-scroller">
+            <div class="screen-frame screen-frame-flat">
+              <canvas id="pixel-canvas" width="400" height="300" aria-label="放大后的像素视图"></canvas>
+            </div>
+          </div>
+          <p class="hint">点击任意位置可重新绘制；滚动查看整屏。</p>
+        </div>
+
+        <div class="mode-panel" id="mode-layout" hidden>
+          <div class="screen-frame" id="layout-frame">
+            <img id="layout-img" src="/api/screen.png" width="400" height="300" alt="带区域标注的画面">
+            <div class="zone-layer" id="zone-layer" aria-hidden="true"></div>
+          </div>
+          <p class="hint">标注来自 <code>/api/debug/layout</code>，纵坐标单位为屏幕像素。</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <dl class="inline-stats">
+          <div><dt>上次刷新</dt><dd id="scr-updated">—</dd></div>
+          <div><dt>文件大小</dt><dd id="scr-size">—</dd></div>
+          <div><dt>渲染耗时</dt><dd id="scr-ms">—</dd></div>
+          <div><dt>累计</dt><dd id="scr-count">0</dd></div>
+          <div><dt>下次自动</dt><dd id="scr-next">—</dd></div>
+        </dl>
+        <div class="action-row">
+          <a class="btn" href="/api/screen.png" download="screen_epd.png">下载墨水屏 PNG</a>
+          <a class="btn" href="/api/screen_raw.png" download="screen_raw.png">下载原始灰度图</a>
+          <a class="btn" href="/api/info" target="_blank" rel="noopener">查看 JSON</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 内容 ============ -->
+    <section class="view" id="view-content" data-view="content" hidden>
+      <div class="split">
+
+        <article class="card">
+          <div class="card-head">
+            <h2>底部自定义文本</h2>
+            <span class="badge" id="saved-hint">未加载</span>
+          </div>
+
+          <div class="field">
+            <label for="content-input">显示内容</label>
+            <textarea id="content-input" rows="7" spellcheck="false"
+                      placeholder="例如：妈妈生日快到了 🎂&#10;第二行会自动分页"></textarea>
+            <p class="field-hint">换行即分页，底栏每分钟轮播一页；单行建议不超过 22 个汉字。</p>
+          </div>
+
+          <div class="editor-meta">
+            <span id="content-lines">0 行</span>
+            <span id="content-chars">0 字</span>
+            <span id="content-compat">符号均可在屏幕上显示</span>
+          </div>
+
+          <div class="palette" aria-label="符号与表情">
+            <div class="palette-head">
+              <div class="palette-tabs" id="palette-tabs" role="tablist" aria-label="符号分类"></div>
+              <label class="search">
+                <span class="visually-hidden">搜索符号</span>
+                <input id="palette-search" type="search" placeholder="搜索符号…" autocomplete="off">
+              </label>
+            </div>
+            <div class="palette-grid" id="palette-grid" role="group" aria-label="可插入的符号"></div>
+            <p class="palette-note" id="palette-note">正在载入符号表…</p>
+          </div>
+
+          <div class="action-row">
+            <button type="button" class="btn btn-primary" id="btn-save">保存到设备</button>
+            <button type="button" class="btn" id="btn-reset">还原</button>
+            <button type="button" class="btn" id="btn-clear">清空</button>
+          </div>
+          <p class="form-msg" id="content-msg" role="status" aria-live="polite"></p>
+
+          <div class="templates">
+            <p class="templates-title">快捷模板</p>
+            <div class="action-row" id="template-row">
+              <button type="button" class="btn btn-small" data-template="reminder">今日提醒</button>
+              <button type="button" class="btn btn-small" data-template="birthday">生日祝福</button>
+              <button type="button" class="btn btn-small" data-template="weather">天气问候</button>
+              <button type="button" class="btn btn-small" data-template="blank">清空内容</button>
+            </div>
+          </div>
+        </article>
+
+        <div class="stack">
+          <article class="card">
+            <div class="card-head">
+              <h2>底栏预览</h2>
+              <span class="badge" id="preview-state">待更新</span>
+            </div>
+            <div class="screen-frame screen-frame-wide preview-frame">
+              <img id="edit-preview" src="/api/screen.png" width="400" height="300" alt="底栏文本预览">
+              <div class="screen-overlay" id="preview-spinner" hidden><span class="spinner" aria-hidden="true"></span></div>
+            </div>
+            <p class="card-foot">只渲染自定义文本页，用来确认换行、宽度和符号效果。保存后设备画面才会改变。</p>
+          </article>
+
+          <article class="card">
+            <div class="card-head"><h2>墨水屏限制</h2></div>
+            <ul class="note-list">
+              <li>单色屏，没有彩色；灰度靠抖动模拟。</li>
+              <li>底栏字号 12px，一行约 22 个汉字，超出会自动折行。</li>
+              <li>表情若不受字体支持，会按降级表显示成文字或符号。</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 系统 ============ -->
+    <section class="view" id="view-system" data-view="system" hidden>
+      <div class="grid-2">
+        <article class="card">
+          <div class="card-head">
+            <h2>布局参数</h2>
+            <button type="button" class="btn btn-small" id="layout-refresh">重新读取</button>
+          </div>
+          <table class="table">
+            <thead><tr><th scope="col">区域</th><th scope="col">y</th><th scope="col">高度</th></tr></thead>
+            <tbody id="layout-body">
+              <tr><td colspan="3" class="table-empty">加载中…</td></tr>
+            </tbody>
+          </table>
+          <div class="action-row legend-row">
+            <span><b>画布</b> <span id="layout-canvas">—</span></span>
+            <span><b>分割线</b> <span id="layout-dividers">—</span></span>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-head"><h2>接口</h2></div>
+          <table class="table">
+            <thead><tr><th scope="col">路径</th><th scope="col">访问</th></tr></thead>
+            <tbody>
+              <tr><td><code>/api/screen</code></td><td><span class="badge badge-open">设备</span></td></tr>
+              <tr><td><code>/api/screen_2x</code></td><td><span class="badge badge-open">设备</span></td></tr>
+              <tr><td><code>/api/screen.png</code></td><td><span class="badge badge-open">公开</span></td></tr>
+              <tr><td><code>/api/time</code></td><td><span class="badge badge-open">公开</span></td></tr>
+              <tr><td><code>/api/info</code></td><td><span class="badge badge-lock">需登录</span></td></tr>
+              <tr><td><code>/api/bottom_content</code></td><td><span class="badge badge-lock">需登录</span></td></tr>
+              <tr><td><code>/api/debug/layout</code></td><td><span class="badge badge-lock">需登录</span></td></tr>
+            </tbody>
+          </table>
+        </article>
+      </div>
+
+      <article class="card">
+        <div class="card-head">
+          <h2>当前数据</h2>
+          <div class="action-row action-row-tight">
+            <button type="button" class="btn btn-small" id="json-refresh">刷新</button>
+            <button type="button" class="btn btn-small" id="json-copy">复制 JSON</button>
+          </div>
+        </div>
+        <pre class="json-view" id="json-view" tabindex="0">加载中…</pre>
+      </article>
+    </section>
+
+    <!-- ============ 账号 ============ -->
+    <section class="view" id="view-account" data-view="account" hidden>
+      <div class="grid-2">
+        <article class="card">
+          <div class="card-head"><h2>修改密码</h2></div>
+          <p class="card-note" id="acct-env-warning" hidden>
+            当前密码由环境变量 <code>CLOCK_ADMIN_PASSWORD</code> 管理，界面无法修改。
+          </p>
+          <form id="password-form" novalidate>
+            <div class="field">
+              <label for="pw-old">原密码</label>
+              <input id="pw-old" name="old" type="password" autocomplete="current-password" required>
+            </div>
+            <div class="field">
+              <label for="pw-new">新密码</label>
+              <input id="pw-new" name="new" type="password" autocomplete="new-password" required minlength="6">
+              <p class="field-hint">至少 6 位，建议混用字母和数字。</p>
+            </div>
+            <div class="field">
+              <label for="pw-confirm">确认新密码</label>
+              <input id="pw-confirm" name="confirm" type="password" autocomplete="new-password" required>
+            </div>
+            <div class="action-row">
+              <button type="submit" class="btn btn-primary" id="pw-submit">更新密码</button>
+            </div>
+            <p class="form-msg" id="pw-msg" role="status" aria-live="polite"></p>
+          </form>
+        </article>
+
+        <div class="stack">
+          <article class="card">
+            <div class="card-head"><h2>会话</h2></div>
+            <dl class="stat-list">
+              <div class="stat-row"><dt>登录时间</dt><dd id="acct-login-at">—</dd></div>
+              <div class="stat-row"><dt>密码存储</dt><dd id="acct-mode">—</dd></div>
+            </dl>
+            <form method="post" action="/logout">
+              <button type="submit" class="btn btn-block">退出登录</button>
+            </form>
+          </article>
+
+          <article class="card">
+            <div class="card-head"><h2>安全提示</h2></div>
+            <ul class="note-list">
+              <li>后台只做了单密码保护，适合家庭局域网；不要暴露到公网。</li>
+              <li>登录密码存在服务器 <code>server/auth.json</code>，重启不会丢失。</li>
+              <li>设备拉图接口保持开放，否则时钟会停止更新。</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="/static/js/console.js"></script>
+</body>
+</html>

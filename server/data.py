@@ -695,12 +695,15 @@ def _parse_client_time(client_time):
     except:
         return time.time()
 
-def collect(force_refresh=False, client_time=None, rssi=None):
+def collect(force_refresh=False, client_time=None, rssi=None, bottom_override=None):
     weather = _get_weather(force_refresh)
-    bottom_custom = load_bottom_content()
     launch = _get_next_launch(force_refresh)
-    if launch.get("text"):
-        bottom_custom = launch["text"] + ("\n" + bottom_custom if bottom_custom else "")
+    if bottom_override is not None:
+        bottom_custom = bottom_override
+    else:
+        bottom_custom = load_bottom_content()
+        if launch.get("text"):
+            bottom_custom = launch["text"] + ("\n" + bottom_custom if bottom_custom else "")
     hko_warning = get_hko_warning(force_refresh)
     flw_warning = get_flw_warning(force_refresh)
     return {

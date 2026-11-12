@@ -16,6 +16,8 @@ import os
 import sys
 from PIL import Image, ImageDraw, ImageFont
 
+import symbols as _symbols
+
 try:
     import freetype
     HAVE_FREETYPE = True
@@ -364,6 +366,60 @@ def draw_weather_icon(draw, cond, cx, cy, size, fill):
 
 
 # ============================================================
+# 底栏文本兼容处理（emoji 降级 / 可选表情字体）
+# ============================================================
+
+_emoji_font_path = None
+_emoji_font_checked = False
+
+
+def find_emoji_font():
+    """找可用的表情/符号字体；找不到返回 None"""
+    global _emoji_font_path, _emoji_font_checked
+    if _emoji_font_checked:
+        return _emoji_font_path
+    _emoji_font_checked = True
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+
+    font_dir = os.path.join(here, "fonts")
+    if os.path.isdir(font_dir):
+        for name in sorted(os.listdir(font_dir)):
+            if name.lower().endswith((".ttf", ".otf")):
+                candidates.append(os.path.join(font_dir, name))
+
+    candidates += [
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/opentype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
+        r"C:\Windows\Fonts\seguiemj.ttf",
+        r"C:\Windows\Fonts\seguisym.ttf",
+    ]
+
+    for path in candidates:
+        if os.path.exists(path):
+            _emoji_font_path = path
+            print(f"    表情字体: {os.path.basename(path)}")
+            break
+
+    return _emoji_font_path
+
+
+def prepare_bottom_text(text):
+    """底栏文本：有表情字体则保留 emoji，否则按降级表替换成可显示内容"""
+    if not text:
+        return ""
+    if find_emoji_font():
+        return (
+            text.replace("\ufe0f", "")
+                .replace("\u200d", "")
+                .replace("\r\n", "\n")
+        )
+    return _symbols.sanitize(text)
+
+
+# ============================================================
 # 布局（400x300 坐标）
 # ============================================================
 
@@ -708,7 +764,7 @@ class Renderer2x:
         return lines
 
     def _draw_bottom_text(self, draw, data):
-        bottom = data.get("bottom", "")
+        bottom = prepare_bottom_text(data.get("bottom", ""))
         weather_warning = data.get("weather_warning", {})
         flw_warning = data.get("flw_warning", "")
         minute = data.get("now", {}).get("minute", 0)
@@ -1202,7 +1258,7 @@ class Renderer:
         return lines
 
     def _draw_bottom_text(self, draw, data):
-        bottom = data.get("bottom", "")
+        bottom = prepare_bottom_text(data.get("bottom", ""))
         weather_warning = data.get("weather_warning", {})
         flw_warning = data.get("flw_warning", "")
         minute = data.get("now", {}).get("minute", 0)

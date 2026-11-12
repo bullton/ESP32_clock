@@ -10,8 +10,8 @@
 ### ⚠️ 两个渲染器都要改
 `server/renderer.py` 有**两个**渲染器类：
 
-- `Renderer2x` (class 在 line 275) - 高分辨率渲染（800x600）
-- `Renderer` (class 在 line 484) - 1x 渲染（400x300）
+- `Renderer2x`（搜索 `class Renderer2x`）- 高分辨率渲染（800x600）
+- `Renderer`（搜索 `class Renderer`）- 1x 渲染（400x300）
 
 **两个类的 `_draw_current_weather` 方法都要分别修改**，改了 1x 忘了 2x 会出现"改了不生效"的诡异问题。
 
@@ -132,3 +132,34 @@ def patched(self, xy, text, **kw):
     return original(self, xy, text, **kw)
 ImageDraw.ImageDraw.text = patched
 ```
+
+## 后台与权限（2026-11 重构）
+
+### 入口
+- GET /console —— 统一后台（概览 / 画面 / 内容 / 系统 / 账号）
+- GET /admin → 重定向 /console#content；GET /preview → /console#screen
+- GET /login —— 单密码登录；/logout 退出
+
+### 密码
+- 密码哈希与 session 密钥保存在 server/auth.json（已加入 .gitignore）
+- 首次启动自动生成，默认密码 clock2026，会打印到启动日志，登录后请到「账号」页修改
+- 设置环境变量 CLOCK_ADMIN_PASSWORD 可接管密码，此时界面修改密码会被禁用
+- 忘记密码：删除 server/auth.json 后重启，会重新生成
+
+### 受保护 / 公开
+- 需登录：/console、/api/info、/api/bottom_content、/api/debug/layout、
+  /api/console/*、/api/account*
+- 保持公开（设备与预览用）：/api/screen、/api/screen_2x、/api/screen.png、
+  /api/screen_2x.png、/api/screen_raw.png、/api/time、/api/health
+
+### 前端资源
+- 模板：server/templates/console.html、login.html
+- 样式：server/static/css/console.css（设计令牌集中在 :root）
+- 脚本：server/static/js/console.js
+- 字体：server/static/fonts/Unbounded-Medium.ttf
+
+### 底栏符号与表情
+- 面板数据在 server/symbols.py（SYMBOL_GROUPS 内容 + EMOJI_MAP 降级表）
+- 渲染时 enderer.prepare_bottom_text() 处理：有表情字体则保留 emoji，
+  否则按降级表替换；无法识别的 emoji 变成 ·
+- 想启用真实 emoji：把单色 outline 字体放进 server/fonts/ 后重启

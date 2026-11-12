@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 · 墨水屏控制台</title>
+<link rel="stylesheet" href="/static/css/console.css">
+</head>
+<body class="auth-body">
+
+<main class="auth">
+  <section class="auth-brand" aria-label="项目信息">
+    <div class="auth-glyph" aria-hidden="true">
+      <span>12</span><span class="colon">:</span><span>34</span>
+    </div>
+    <p class="auth-kicker">4.2&quot; e-Paper · 400 × 300 · 1-bit</p>
+    <h1>墨水屏控制台</h1>
+    <p class="auth-lede">管理画面、底栏文本与数据源。设备端每分钟自动拉取一次渲染结果。</p>
+    <dl class="auth-facts">
+      <div><dt>渲染</dt><dd>服务端 Pillow → 15000 字节位图</dd></div>
+      <div><dt>刷新</dt><dd>整点全刷 · 平时局刷</dd></div>
+    </dl>
+  </section>
+
+  <section class="auth-panel" aria-label="登录表单">
+    <h2>登录</h2>
+    <p class="auth-panel-sub">这个后台只对局域网内的家庭成员开放。</p>
+
+    <form method="post" action="/login" class="auth-form" novalidate>
+      {% if next_path %}<input type="hidden" name="next" value="{{ next_path }}">{% endif %}
+
+      <div class="field">
+        <label for="password">访问密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password"
+               required autofocus spellcheck="false"{% if error %} aria-invalid="true" aria-describedby="login-error"{% endif %}>
+      </div>
+
+      {% if error %}
+      <p class="field-error" id="login-error" role="alert">{{ error }}</p>
+      {% endif %}
+
+      <button type="submit" class="btn btn-primary btn-block">进入后台</button>
+    </form>
+
+    {% if env_managed %}
+    <p class="auth-note">当前密码由服务器环境变量 <code>CLOCK_ADMIN_PASSWORD</code> 管理。</p>
+    {% else %}
+    <p class="auth-note">忘记密码？在服务器上删除 <code>server/auth.json</code> 后重启服务，会重新生成初始密码并打印到日志。</p>
+    {% endif %}
+  </section>
+</main>
+
+</body>
+</html>

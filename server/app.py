@@ -7,26 +7,165 @@ app.py - Flask 服务端入口
 
 启动: python app.py
 访问:
-  http://localhost:5000/                   欢迎页
-  http://localhost:5000/preview            浏览器预览（拉 PNG）
-  http://localhost:5000/api/screen        15000 字节 raw buffer（ESP32 拉这个）
-  http://localhost:5000/api/screen.png    PNG 图片（浏览器预览用）
-  http://localhost:5000/api/info          JSON 当前数据
+  http://localhost:5000/console        统一后台（需登录）
+  http://localhost:5000/login          登录
+  http://localhost:5000/api/screen     15000 字节 raw buffer（ESP32 拉这个）
+  http://localhost:5000/api/screen.png PNG 图片（设备与预览用）
+  http://localhost:5000/api/info       JSON 当前数据（需登录）
 """
 
-import io
 import time
-from flask import Flask, Response, render_template, jsonify, request
+from urllib.parse import quote
 
+from flask import (
+    Flask, Response, render_template, jsonify, request,
+    session, redirect,
+)
+
+import auth
 import data
 import renderer
+import symbols
 
 
 app = Flask(__name__)
+app.secret_key = auth.secret_key()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_NAME="clock_admin",
+    PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7,
+)
+
 _renderer = renderer.Renderer()
 WIDTH, HEIGHT = 400, 300
 BUF_SIZE = WIDTH * HEIGHT // 8  # 15000
 
+
+# ============================================================
+# 登录保护
+# ============================================================
+
+PUBLIC_PATHS = {
+    "/login",
+    "/favicon.ico",
+    "/api/screen",
+    "/api/screen_2x",
+    "/api/screen.png",
+    "/api/screen_2x.png",
+    "/api/screen_raw.png",
+    "/api/time",
+    "/api/health",
+}
+
+
+def _is_public(path):
+    return path in PUBLIC_PATHS or path.startswith("/static/")
+
+
+def _safe_next(target, fallback="/console"):
+    if not target or not target.startswith("/") or target.startswith("//"):
+        return fallback
+    return target
+
+
+@app.before_request
+def _require_login():
+    path = request.path
+    if _is_public(path):
+        return None
+    if session.get("auth"):
+        return None
+    if path.startswith("/api/"):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    if path in ("/", "/console"):
+        return redirect("/login")
+    return redirect("/login?next=" + quote(path))
+
+
+def _client_ip():
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.remote_addr or "?"
+
+
+# ============================================================
+# 后台页面
+# ============================================================
+
+def _no_store(html):
+    resp = Response(html, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+@app.route("/")
+def index():
+    return redirect("/console")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    ip = _client_ip()
+    wait = auth.locked_for(ip)
+    error = ""
+
+    if request.method == "POST":
+        if wait:
+            error = "尝试次数过多，请 %d 分钟后再试" % max(1, wait // 60)
+        elif auth.verify(request.form.get("password", "")):
+            auth.clear_failures(ip)
+            session.clear()
+            session["auth"] = True
+            session["login_at"] = int(time.time())
+            session.permanent = True
+            return redirect(_safe_next(request.args.get("next") or request.form.get("next")))
+        else:
+            auth.note_failure(ip)
+            wait = auth.locked_for(ip)
+            error = "密码不正确" if not wait else "尝试次数过多，请 %d 分钟后再试" % max(1, wait // 60)
+
+    if session.get("auth"):
+        return redirect("/console")
+    return _no_store(render_template(
+        "login.html",
+        error=error,
+        next_path=_safe_next(request.args.get("next"), ""),
+        env_managed=auth.env_managed(),
+    ))
+
+
+@app.route("/logout", methods=["POST", "GET"])
+def logout():
+    session.clear()
+    return redirect("/login")
+
+
+@app.route("/console")
+def console():
+    return _no_store(render_template("console.html", env_managed=auth.env_managed()))
+
+
+# 旧地址保持可用
+@app.route("/admin")
+def legacy_admin():
+    return redirect("/console#content")
+
+
+@app.route("/preview")
+def legacy_preview():
+    return redirect("/console#screen")
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return ("", 204)
+
+
+# ============================================================
+# 渲染辅助
+# ============================================================
 
 def _wait_until_next_minute():
     """等待到下一分钟整点，返回下次请求间隔秒数。"""
@@ -48,46 +187,27 @@ def _wait_until_next_minute():
     return next_interval
 
 
-# ============================================================
-# 路由
-# ============================================================
+def _apply_env_temp():
+    env_temp = request.args.get("env_temp")
+    if env_temp is not None:
+        try:
+            data.ENV_TEMP = float(env_temp)
+        except ValueError:
+            pass
+    return data.ENV_TEMP
 
-@app.route("/")
-def index():
-    return (
-        "<h1>墨水屏时钟 - 服务端</h1>"
-        "<ul>"
-        "<li><a href='/preview'>/preview</a> - 浏览器预览（拉 PNG）</li>"
-        "<li><a href='/api/screen_raw.png'>/api/screen_raw.png</a> - <b>1:1 原始图</b>（400x300 灰度）</li>"
-        "<li><a href='/api/screen_2x.png'>/api/screen_2x.png</a> - <b>2x 高清图</b>（800x600渲染→400x300，文字更平滑）</li>"
-        "<li><a href='/api/screen.png'>/api/screen.png</a> - 1-bit PNG（ESP32 用 1:1）</li>"
-        "<li><a href='/api/screen_2x'>/api/screen_2x</a> - 15000 字节 raw（ESP32 用 2x 渲染）</li>"
-        "<li><a href='/api/info'>/api/info</a> - JSON 当前数据</li>"
-        "</ul>"
-        "<p>4 区布局：时间 / 当前天气 / 7 日天气 / 古诗</p>"
-        "<p><b>对比：</b>2x 渲染文字边缘更平滑，适合浏览；1:1 原始用于 ESP32</p>"
-    )
 
+# ============================================================
+# 设备接口（公开）
+# ============================================================
 
 @app.route("/api/screen")
 def api_screen():
-    """
-    核心接口：返回 15000 字节 raw binary (MONO_HLSB 格式)
-
-    ESP32 端直接:
-        r = urequests.get(SERVER_URL)
-        epd.display_frame(r.content)
-
-    查询参数:
-        refresh=1 - 强制刷新天气（用于全刷时）
-        env_temp=25.5 - 现场温度传感器数据
-    """
+    """核心接口：返回 15000 字节 raw binary (MONO_HLSB 格式)"""
     try:
         next_interval = _wait_until_next_minute()
         force_refresh = request.args.get("refresh", "0") == "1"
-        env_temp = request.args.get("env_temp")
-        if env_temp is not None:
-            data.ENV_TEMP = float(env_temp)
+        _apply_env_temp()
         print(f"[env_temp] {data.ENV_TEMP}°C")
         payload = data.collect(force_refresh=force_refresh)
         img, _ = _renderer.render(payload)  # (1bit, raw)
@@ -110,17 +230,13 @@ def api_screen():
 
 @app.route("/api/screen.png")
 def api_screen_png():
-    """PNG 预览：转换后的 400x300 1-bit 图"""
+    """PNG 预览：1x 400x300"""
     try:
-
-        env_temp = request.args.get("env_temp")
-        if env_temp is not None:
-            data.ENV_TEMP = float(env_temp)
+        _apply_env_temp()
         payload = data.collect()
-        img, _ = _renderer.render(payload)  # (1bit, raw800)
-        png_bytes = renderer.to_png_bytes(img)
+        img, _ = _renderer.render(payload)
         return Response(
-            png_bytes,
+            renderer.to_png_bytes(img),
             mimetype="image/png",
             headers={"Cache-Control": "no-store"},
         )
@@ -133,12 +249,10 @@ def api_screen_png():
 def api_screen_raw_png():
     """原始设计图：400x300 灰度（用于对比）"""
     try:
-
         payload = data.collect()
-        img_raw = renderer.render_raw(payload)  # 400x300 L 灰度图
-        png_bytes = renderer.to_png_bytes(img_raw)
+        img_raw = renderer.render_raw(payload)
         return Response(
-            png_bytes,
+            renderer.to_png_bytes(img_raw),
             mimetype="image/png",
             headers={"Cache-Control": "no-store"},
         )
@@ -149,20 +263,11 @@ def api_screen_raw_png():
 
 @app.route("/api/screen_2x")
 def api_screen_2x():
-    """
-    2x 高分辨率渲染：800x600 → 缩放 → 15000 字节 raw binary
-    先渲染大图再缩小，文字边缘更平滑
-
-    查询参数:
-        refresh=1 - 强制刷新天气（用于全刷时）
-        env_temp=25.5 - 现场温度传感器数据
-    """
+    """2x 高分辨率渲染后缩小到 15000 字节 raw binary"""
     try:
         next_interval = _wait_until_next_minute()
         force_refresh = request.args.get("refresh", "0") == "1"
-        env_temp = request.args.get("env_temp")
-        if env_temp is not None:
-            data.ENV_TEMP = float(env_temp)
+        _apply_env_temp()
         print(f"[env_temp] {data.ENV_TEMP}°C")
         payload = data.collect(force_refresh=force_refresh)
         img_1bit, _ = renderer.render_hires(payload)
@@ -188,78 +293,17 @@ def api_screen_2x():
 def api_screen_2x_png():
     """2x 高分辨率 PNG 预览"""
     try:
-
-        env_temp = request.args.get("env_temp")
-        if env_temp is not None:
-            data.ENV_TEMP = float(env_temp)
+        _apply_env_temp()
         payload = data.collect()
-        img_1bit, img_gray = renderer.render_hires(payload)
-        png_bytes = renderer.to_png_bytes(img_gray)
+        _, img_gray = renderer.render_hires(payload)
         return Response(
-            png_bytes,
+            renderer.to_png_bytes(img_gray),
             mimetype="image/png",
             headers={"Cache-Control": "no-store"},
         )
     except Exception as e:
         app.logger.exception("2x PNG 渲染失败")
         return Response(f"render error: {e}", status=503, mimetype="text/plain")
-
-
-@app.route("/preview")
-def preview():
-    return render_template("preview.html")
-
-
-@app.route("/admin")
-def admin():
-    return render_template("admin.html")
-
-
-@app.route("/api/bottom_content")
-def api_bottom_content_get():
-    return jsonify({"content": data.load_bottom_content()})
-
-
-@app.route("/api/bottom_content", methods=["POST"])
-def api_bottom_content_save():
-    payload = request.get_json()
-    data.save_bottom_content(payload.get("content", ""))
-    return jsonify({"ok": True})
-
-
-@app.route("/api/info")
-def api_info():
-    env_temp = request.args.get("env_temp")
-    if env_temp is not None:
-        data.ENV_TEMP = float(env_temp)
-    payload = data.collect()
-    payload["now"]["datetime"] = payload["now"]["datetime"].isoformat()
-    return jsonify(payload)
-
-
-@app.route("/api/debug/layout")
-def api_debug_layout():
-    L = renderer.Layout
-    return jsonify({
-        "canvas": {"W": L.W, "H": L.H, "margin": L.M},
-        "zones": {
-            "top_bar":   {"y": L.TOP_Y},
-            "time":      {"y": L.TIME_Y},
-            "weather":   {"y": L.WEATHER_Y},
-            "forecast":  {"y": L.FCST_Y},
-            "poem":      {"y": L.POEM_Y},
-            "countdown": {"y": L.FOOT_Y},
-        },
-        "dividers": {
-            "div1": L.DIV1_Y, "div2": L.DIV2_Y,
-            "div3": L.DIV3_Y, "div4": L.DIV4_Y, "div5": L.DIV5_Y,
-        },
-        "data_source": {
-            "mock_weather": data.USE_MOCK_WEATHER,
-            "city": data.CITY_NAME,
-            "timezone": data.TZ_NAME,
-        },
-    })
 
 
 @app.route("/api/health")
@@ -269,8 +313,9 @@ def api_health():
 
 @app.route("/api/time")
 def api_time():
-    """返回服务器当前时间（Asia/Shanghai，UTC+8），供 ESP32 校正 RTC"""
-    import datetime, zoneinfo
+    """服务器当前时间（Asia/Shanghai，UTC+8），供 ESP32 校正 RTC"""
+    import datetime
+    import zoneinfo
     now_utc = datetime.datetime.now(zoneinfo.ZoneInfo("UTC"))
     now_local = now_utc.astimezone(zoneinfo.ZoneInfo("Asia/Shanghai"))
     return {
@@ -279,53 +324,118 @@ def api_time():
     }
 
 
-@app.route("/api/test_fonts")
-def api_test_fonts():
-    """Test font rendering"""
-    from PIL import Image, ImageDraw, ImageFont
-    import os
+# ============================================================
+# 后台接口（需登录）
+# ============================================================
 
-    img = Image.new("L", (400, 300), 255)
-    draw = ImageDraw.Draw(img)
+@app.route("/api/info")
+def api_info():
+    _apply_env_temp()
+    payload = data.collect()
+    payload["now"]["datetime"] = payload["now"]["datetime"].isoformat()
+    return jsonify(payload)
 
-    # Find fonts
-    ch_path = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
-    wi_path = os.path.join(os.path.dirname(__file__), "weathericons-regular-webfont.ttf")
 
-    fonts_info = {
-        "ch_path_exists": os.path.exists(ch_path),
-        "wi_path_exists": os.path.exists(wi_path),
-        "ch_path": ch_path,
-        "wi_path": wi_path,
-    }
+@app.route("/api/bottom_content")
+def api_bottom_content_get():
+    return jsonify({"content": data.load_bottom_content()})
+
+
+@app.route("/api/bottom_content", methods=["POST"])
+def api_bottom_content_save():
+    payload = request.get_json(silent=True) or {}
+    content = payload.get("content", "")
+    if not isinstance(content, str):
+        return jsonify({"ok": False, "error": "内容格式不正确"}), 400
+    data.save_bottom_content(content)
+    return jsonify({"ok": True, "saved": symbols.sanitize(content)})
+
+
+@app.route("/api/console/palette")
+def api_console_palette():
+    return jsonify(symbols.palette())
+
+
+@app.route("/api/console/analyze", methods=["POST"])
+def api_console_analyze():
+    payload = request.get_json(silent=True) or {}
+    return jsonify(symbols.analyze(payload.get("content", "")))
+
+
+@app.route("/api/console/preview", methods=["POST"])
+def api_console_preview():
+    """用未保存的文本渲染一屏，只显示自定义文本页"""
+    payload = request.get_json(silent=True) or {}
+    content = payload.get("content", "")
+    if not isinstance(content, str):
+        return jsonify({"ok": False, "error": "内容格式不正确"}), 400
 
     try:
-        if os.path.exists(ch_path):
-            f_ch = ImageFont.truetype(ch_path, 24)
-            draw.text((20, 20), "中文测试", font=f_ch, fill=0)
-            fonts_info["ch_loaded"] = True
-        else:
-            fonts_info["ch_loaded"] = False
-    except Exception as e:
-        fonts_info["ch_error"] = str(e)
-        fonts_info["ch_loaded"] = False
+        text = symbols.sanitize(content)
+        preview = data.collect(bottom_override=text)
+        preview["weather_warning"] = {}
+        preview["flw_warning"] = ""
+        preview["now"]["minute"] = 0
 
-    try:
-        if os.path.exists(wi_path):
-            f_wi = ImageFont.truetype(wi_path, 36)
-            # Draw sunny icon (0xF00D)
-            icon_char = chr(0xF00D)
-            draw.text((20, 60), icon_char, font=f_wi, fill=0)
-            fonts_info["wi_loaded"] = True
+        hires = bool(payload.get("hires"))
+        if hires:
+            img_1bit, gray = renderer.render_hires(preview)
+            img = gray
         else:
-            fonts_info["wi_loaded"] = False
-    except Exception as e:
-        fonts_info["wi_error"] = str(e)
-        fonts_info["wi_loaded"] = False
+            img, gray = _renderer.render(preview)
 
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return Response(buf.getvalue(), mimetype="image/png")
+        return Response(
+            renderer.to_png_bytes(img),
+            mimetype="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception as e:
+        app.logger.exception("预览渲染失败")
+        return Response(f"render error: {e}", status=503, mimetype="text/plain")
+
+
+@app.route("/api/debug/layout")
+def api_debug_layout():
+    L = renderer.Layout
+    return jsonify({
+        "canvas": {"W": L.W, "H": L.H, "margin": L.M},
+        "zones": {
+            "top_bar":  {"y": L.TOP_Y, "h": L.DIV1_Y - L.TOP_Y},
+            "main":     {"y": L.MAIN_TOP, "h": L.MAIN_BOTTOM - L.MAIN_TOP},
+            "forecast": {"y": L.FCST_Y, "h": L.FCST_BOTTOM - L.FCST_Y},
+            "bottom":   {"y": L.BOTTOM_TOP, "h": L.BOTTOM_BOT - L.BOTTOM_TOP},
+        },
+        "dividers": {
+            "div1": L.DIV1_Y, "div2": L.DIV2_Y, "div3": L.DIV3_Y,
+        },
+        "columns": {
+            "time_x2": L.TIME_X2, "weather_x1": L.WEATHER_X1,
+        },
+        "data_source": {
+            "mock_weather": data.USE_MOCK_WEATHER,
+            "city": data.CITY_NAME,
+            "timezone": data.TZ_NAME,
+        },
+    })
+
+
+@app.route("/api/account")
+def api_account():
+    login_at = session.get("login_at")
+    return jsonify({
+        "env_managed": auth.env_managed(),
+        "login_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(login_at)) if login_at else "",
+        "password_hint": "由环境变量 CLOCK_ADMIN_PASSWORD 管理" if auth.env_managed() else "保存在 server/auth.json",
+    })
+
+
+@app.route("/api/account/password", methods=["POST"])
+def api_account_password():
+    payload = request.get_json(silent=True) or {}
+    ok, message = auth.change_password(
+        str(payload.get("old", "")), str(payload.get("new", ""))
+    )
+    return jsonify({"ok": ok, "message": message}), (200 if ok else 400)
 
 
 # ============================================================
@@ -333,12 +443,12 @@ def api_test_fonts():
 # ============================================================
 
 if __name__ == "__main__":
-    print("=" * 50)
+    print("=" * 52)
     print("  墨水屏时钟 - 服务端")
-    print("=" * 50)
-    print("  浏览器:   http://localhost:5000/preview")
-    print("  ESP32:   http://<本机IP>:5000/api/screen")
-    print("  字节数:  15000 (400×300÷8, MONO_HLSB)")
+    print("=" * 52)
+    print("  后台     http://localhost:5000/console")
+    print("  ESP32    http://<本机IP>:5000/api/screen")
+    print("  字节数   15000 (400×300÷8, MONO_HLSB)")
     print("  按 Ctrl+C 停止")
-    print("=" * 50)
+    print("=" * 52)
     app.run(host="0.0.0.0", port=5000, debug=False)
