@@ -16,7 +16,7 @@ cp /tmp/bottom_content.txt.bak bottom_content.txt 2>/dev/null || true
 cp /tmp/alarm.json.bak alarm.json 2>/dev/null || true
 
 # 把 server/ 子目录的内容复制到运行目录（覆盖根目录里旧的散装文件）
-cp -f server/app.py server/data.py server/renderer.py server/symbols.py server/auth.py .
+cp -f server/app.py server/data.py server/renderer.py server/symbols.py server/auth.py server/styles.py .
 cp -f server/requirements.txt .
 cp -f server/*.ttf server/*.otf . 2>/dev/null || true
 

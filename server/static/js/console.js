@@ -58,7 +58,7 @@
     $("#page-eyebrow").textContent = meta.eyebrow;
 
     if (name === "overview") loadOverview();
-    if (name === "screen") refreshScreen(false);
+    if (name === "screen") { refreshScreen(false); loadStyles(false); }
     if (name === "content") {
       if (!state.palette) loadPalette();
       refreshEditPreview();
@@ -676,6 +676,129 @@
     if (!state.dirty) return;
     e.preventDefault();
     e.returnValue = "";
+  });
+
+  /* ------------------------------------------------------------
+     字体方案
+     ------------------------------------------------------------ */
+
+  var STYLE = { loaded: false, data: null, threshold: null };
+
+  function loadStyles(force) {
+    if (STYLE.loaded && !force) {
+      renderStyleGrid();
+      return;
+    }
+    fetch("/api/console/styles", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
+      .then(function (data) {
+        STYLE.loaded = true;
+        STYLE.data = data;
+        STYLE.threshold = data.threshold;
+        renderStyleGrid();
+      })
+      .catch(function () {
+        $("#style-current").textContent = "读取失败";
+      });
+  }
+
+  function activeProfile() {
+    var list = (STYLE.data && STYLE.data.profiles) || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].current) return list[i];
+    }
+    return null;
+  }
+
+  function renderStyleGrid() {
+    var grid = $("#style-grid");
+    if (!STYLE.data) return;
+    var active = activeProfile();
+    $("#style-current").textContent = active ? ("当前：" + active.label) : "未设置";
+
+    grid.innerHTML = "";
+    STYLE.data.profiles.forEach(function (p) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "style-option";
+      btn.dataset.profile = p.id;
+      btn.setAttribute("aria-pressed", p.current ? "true" : "false");
+
+      var img = document.createElement("img");
+      img.alt = p.label + " 方案缩略图";
+      img.src = "/api/console/style_preview?profile=" + encodeURIComponent(p.id) + "&t=" + Date.now();
+      btn.appendChild(img);
+
+      var title = document.createElement("strong");
+      title.textContent = p.label;
+      btn.appendChild(title);
+
+      var desc = document.createElement("span");
+      desc.textContent = p.desc;
+      btn.appendChild(desc);
+
+      btn.addEventListener("click", function () { applyStyle(p.id); });
+      grid.appendChild(btn);
+    });
+
+    var range = $("#style-threshold");
+    var tunable = !!(active && active.aa > 0);
+    $("#style-tuning").hidden = !tunable;
+    if (tunable) {
+      var value = Math.round((STYLE.threshold || active.threshold) * 100);
+      range.value = value;
+      $("#style-threshold-val").textContent = (value / 100).toFixed(2);
+    }
+  }
+
+  function applyStyle(id) {
+    var active = activeProfile();
+    var body = { profile: id };
+    if (active && active.aa > 0) {
+      body.threshold = parseInt($("#style-threshold").value, 10) / 100;
+    }
+
+    setMessage($("#style-msg"), "正在切换…", "");
+    fetch("/api/console/styles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.data.ok) throw new Error(res.data.message || "切换失败");
+        STYLE.threshold = res.data.profile.threshold;
+        STYLE.loaded = false;
+        return loadStyles(false);
+      })
+      .then(function () {
+        setMessage($("#style-msg"), "已切换，设备下一次刷新时生效。", "is-ok");
+        refreshScreen(false);
+        refreshEditPreview();
+      })
+      .catch(function (err) {
+        setMessage($("#style-msg"), "切换失败：" + err.message, "is-bad");
+      });
+  }
+
+  $("#style-threshold").addEventListener("input", function () {
+    var value = parseInt(this.value, 10);
+    $("#style-threshold-val").textContent = (value / 100).toFixed(2);
+    var active = activeProfile();
+    if (!active) return;
+    var pressed = $$(".style-option").filter(function (btn) {
+      return btn.getAttribute("aria-pressed") === "true";
+    })[0];
+    var img = pressed && pressed.querySelector("img");
+    if (img) {
+      img.src = "/api/console/style_preview?profile=" + encodeURIComponent(active.id)
+        + "&threshold=" + (value / 100) + "&t=" + Date.now();
+    }
+  });
+
+  $("#style-threshold").addEventListener("change", function () {
+    var active = activeProfile();
+    if (active) applyStyle(active.id);
   });
 
   /* ------------------------------------------------------------

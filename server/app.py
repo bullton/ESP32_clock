@@ -25,6 +25,7 @@ from flask import (
 import auth
 import data
 import renderer
+import styles
 import symbols
 
 
@@ -37,7 +38,6 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7,
 )
 
-_renderer = renderer.Renderer()
 WIDTH, HEIGHT = 400, 300
 BUF_SIZE = WIDTH * HEIGHT // 8  # 15000
 
@@ -197,6 +197,18 @@ def _apply_env_temp():
     return data.ENV_TEMP
 
 
+def _profile_arg(profile_id, threshold=None):
+    """后台预览用：指定字体方案，可选覆盖阈值；缺省用当前保存的方案"""
+    profile = styles.get(profile_id) if profile_id else styles.current()
+    if threshold not in (None, ""):
+        try:
+            profile = dict(profile)
+            profile["threshold"] = max(0.30, min(0.70, float(threshold)))
+        except (TypeError, ValueError):
+            pass
+    return profile
+
+
 # ============================================================
 # 设备接口（公开）
 # ============================================================
@@ -210,7 +222,7 @@ def api_screen():
         _apply_env_temp()
         print(f"[env_temp] {data.ENV_TEMP}°C")
         payload = data.collect(force_refresh=force_refresh)
-        img, _ = _renderer.render(payload)  # (1bit, raw)
+        img, _ = renderer.render(payload, styles.current())  # (1bit, raw)
         buf = renderer.to_buffer(img)
 
         assert len(buf) == BUF_SIZE, f"长度 {len(buf)}，期望 {BUF_SIZE}"
@@ -234,7 +246,7 @@ def api_screen_png():
     try:
         _apply_env_temp()
         payload = data.collect()
-        img, _ = _renderer.render(payload)
+        img, _ = renderer.render(payload, styles.current())
         return Response(
             renderer.to_png_bytes(img),
             mimetype="image/png",
@@ -250,7 +262,7 @@ def api_screen_raw_png():
     """原始设计图：400x300 灰度（用于对比）"""
     try:
         payload = data.collect()
-        img_raw = renderer.render_raw(payload)
+        img_raw = renderer.render_raw(payload, styles.current())
         return Response(
             renderer.to_png_bytes(img_raw),
             mimetype="image/png",
@@ -270,7 +282,7 @@ def api_screen_2x():
         _apply_env_temp()
         print(f"[env_temp] {data.ENV_TEMP}°C")
         payload = data.collect(force_refresh=force_refresh)
-        img_1bit, _ = renderer.render_hires(payload)
+        img_1bit, _ = renderer.render_hires(payload, styles.current())
         buf = renderer.to_buffer(img_1bit)
 
         assert len(buf) == BUF_SIZE, f"长度 {len(buf)}，期望 {BUF_SIZE}"
@@ -295,7 +307,7 @@ def api_screen_2x_png():
     try:
         _apply_env_temp()
         payload = data.collect()
-        _, img_gray = renderer.render_hires(payload)
+        _, img_gray = renderer.render_hires(payload, styles.current())
         return Response(
             renderer.to_png_bytes(img_gray),
             mimetype="image/png",
@@ -377,12 +389,13 @@ def api_console_preview():
         preview["flw_warning"] = ""
         preview["now"]["minute"] = 0
 
+        profile = _profile_arg(payload.get("profile"), payload.get("threshold"))
         hires = bool(payload.get("hires"))
         if hires:
-            img_1bit, gray = renderer.render_hires(preview)
+            img_1bit, gray = renderer.render_hires(preview, profile)
             img = gray
         else:
-            img, gray = _renderer.render(preview)
+            img, gray = renderer.render(preview, profile)
 
         return Response(
             renderer.to_png_bytes(img),
@@ -391,6 +404,42 @@ def api_console_preview():
         )
     except Exception as e:
         app.logger.exception("预览渲染失败")
+        return Response(f"render error: {e}", status=503, mimetype="text/plain")
+
+
+@app.route("/api/console/styles")
+def api_console_styles():
+    return jsonify({
+        "current": styles.current_id(),
+        "threshold": styles.threshold(),
+        "profiles": styles.list_profiles(),
+    })
+
+
+@app.route("/api/console/styles", methods=["POST"])
+def api_console_styles_save():
+    payload = request.get_json(silent=True) or {}
+    profile_id = payload.get("profile")
+    ok, message, profile = styles.set_profile(profile_id, payload.get("threshold"))
+    if not ok:
+        return jsonify({"ok": False, "message": message}), 400
+    return jsonify({"ok": True, "message": message, "profile": profile})
+
+
+@app.route("/api/console/style_preview")
+def api_console_style_preview():
+    """方案对比缩略图：不保存，按指定方案渲染当前画面"""
+    try:
+        profile = _profile_arg(request.args.get("profile"), request.args.get("threshold"))
+        payload = data.collect()
+        img, _ = renderer.render(payload, profile)
+        return Response(
+            renderer.to_png_bytes(img),
+            mimetype="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception as e:
+        app.logger.exception("方案预览失败")
         return Response(f"render error: {e}", status=503, mimetype="text/plain")
 
 

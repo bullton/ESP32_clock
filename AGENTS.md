@@ -46,6 +46,22 @@ row1_y = zone_top + margin - bbox_top  # 不是 zone_top + margin
 - **超宽按字符切**：段落超过 max_width 时按字符贪心断行
 - **超行截断**：超出 max_lines 时末尾加 `…`
 
+## 字体方案（2026-11 新增，可在后台切换）
+
+文字渲染由两层决定：`styles.py` 里的方案（字重 + 栅格化方式），以及 `renderer.py` 里的
+`MonoTextRenderer`（FreeType 字模 + 可选超采样阈值）。
+
+- 方案列表在 `server/styles.py` 的 `PROFILES`，切换结果存 `server/style.json`（已 gitignore）。
+- `aa = -1` → 走 PIL 原生 `draw.text`（即旧版效果，`classic`）；`aa = 0` → FreeType 单色栅格化；
+  `aa > 1` → 按 N 倍字号灰度渲染、缩回后按阈值二值化（阈值越小笔画越粗）。
+- 栅格化参数通过 `contextvars`（`_RASTER`）传入被 monkey-patch 的 `ImageDraw.text`，
+  渲染期间由 `Renderer.render()` 设置，见 `set_raster()/reset_raster()`。
+- ⚠️ 旧代码用 `draw.im` 直接 `putpixel/paste`，Pillow 9+ 下 `self.im` 是 `ImagingCore` 没有这些方法，
+  异常被 `except: pass` 吞掉 → 每次都静默回退到 PIL 渲染。现在统一用 `self._image`。
+- ⚠️ FreeType 单色位图每行按 `bitmap.pitch` 补齐（不一定等于 `(w+7)//8`），解包时必须按 pitch 跳行。
+- 后台入口：`/console#screen` 的「字体方案」卡片，接口 `GET/POST /api/console/styles`、
+  `GET /api/console/style_preview?profile=`。
+
 ## 布局常量
 
 ### 1x Layout

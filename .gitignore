@@ -22,6 +22,8 @@ server/alarm.json
 # 后台登录凭据（含 session 密钥，切勿提交）
 server/auth.json
 server/auth.json.tmp
+server/style.json
+server/style.json.tmp
 
 # esp32 firmware artifacts
 *.bin

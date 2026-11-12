@@ -12,6 +12,7 @@ renderer.py - 墨水屏渲染核心
   5. emoji 改用 ASCII 字符（稳定可靠）
 """
 
+import contextvars
 import os
 import sys
 from PIL import Image, ImageDraw, ImageFont
@@ -34,14 +35,15 @@ BLACK = 0
 # 全局 mono 文本渲染（用 FreeType FT_LOAD_TARGET_MONO，无抗锯齿）
 # ============================================================
 def mono_text(img, xy, text, font, fill=BLACK):
-    """用 FreeType mono 模式在 1-bit 图像上画文字（替代 draw.text）"""
+    """用 FreeType 模式在 1-bit 图像上画文字（替代 draw.text）"""
     if not HAVE_FREETYPE:
         ImageDraw.Draw(img).text(xy, text, font=font, fill=fill)
         return
     try:
         size_px = font.size
         path = font.path
-        m = get_mono(path, size_px)
+        aa, threshold = _RASTER.get()
+        m = get_mono(path, size_px, aa, threshold)
         m.draw_text(img, xy, text, fill=fill)
     except Exception:
         ImageDraw.Draw(img).text(xy, text, font=font, fill=fill)
@@ -51,13 +53,19 @@ def mono_text(img, xy, text, font, fill=BLACK):
 _original_text = ImageDraw.ImageDraw.text
 
 def _patched_text(self, xy, text, fill=None, font=None, anchor=None, spacing=4, align="left", direction=None, features=None, language=None, stroke_width=0, stroke_fill=None, embedded_color=False):
-    """用 mono 模式替代默认 draw.text"""
+    """用 mono / 超采样模式替代默认 draw.text"""
     if font is not None and HAVE_FREETYPE and hasattr(font, 'size') and hasattr(font, 'path'):
         try:
-            m = get_mono(font.path, font.size)
+            aa, threshold = _RASTER.get()
+            if aa < 0:
+                raise TypeError("pil raster")
+            target = getattr(self, "_image", None)
+            if target is None:
+                raise TypeError("no image handle")
+            m = get_mono(font.path, font.size, aa, threshold)
             x, y = xy[0], xy[1]
-            # 简化的 baseline 处理：原 draw.text 用左上角，mono_text 也用
-            m.draw_text(self.im, (x, y), text, fill=fill if fill is not None else BLACK)
+            # draw.text 的 y 是文字顶部（anchor="la"），这里按基线绘制
+            m.draw_text(target, (x, y + m.ascent), text, fill=fill if fill is not None else BLACK)
             return
         except Exception:
             pass
@@ -74,14 +82,29 @@ ImageDraw.ImageDraw.text = _patched_text
 # FreeType 单色位图渲染（无抗锯齿，笔画绝对等粗）
 # ============================================================
 class MonoTextRenderer:
-    """用 FreeType FT_LOAD_TARGET_MONO 渲染文本，无抗锯齿"""
-    def __init__(self, font_path, size_px):
+    """用 FreeType 渲染文本。
+
+    aa=0：FT_LOAD_TARGET_MONO 单色栅格化（无抗锯齿，笔画等粗，边缘硬）
+    aa>1：按 N 倍字号做灰度渲染，缩回目标尺寸后按阈值二值化
+          （边缘平滑，阈值越低笔画越粗）
+    """
+
+    _MAX_GLYPHS = 6000
+
+    def __init__(self, font_path, size_px, aa=0, threshold=0.5):
         self.face = freetype.Face(font_path)
         # size in 1/64 points
         self.face.set_char_size(size_px * 64)
         self.size_px = size_px
         self.ascent = self.face.size.ascender // 64
         self.descent = -self.face.size.descender // 64
+        self.aa = aa if aa and aa > 1 else 0
+        self.threshold = threshold
+        self._glyphs = {}
+        self._face_aa = None
+        if self.aa:
+            self._face_aa = freetype.Face(font_path)
+            self._face_aa.set_char_size(size_px * self.aa * 64)
 
     def text_size(self, text):
         """返回 (width, height)"""
@@ -91,39 +114,103 @@ class MonoTextRenderer:
             w += self.face.glyph.advance.x // 64
         return w, self.ascent + self.descent
 
+    # ---- 单色字模 ----
+    def _mono_glyph(self, ch):
+        self.face.load_char(ch, freetype.FT_LOAD_RENDER | freetype.FT_LOAD_TARGET_MONO)
+        glyph = self.face.glyph
+        bitmap = glyph.bitmap
+        w, h = bitmap.width, bitmap.rows
+        mask = None
+        if w > 0 and h > 0:
+            row_bytes = (w + 7) // 8
+            pitch = bitmap.pitch
+            data = bytes(bitmap.buffer)
+            if len(data) >= pitch * h:
+                rows = [data[i * pitch: i * pitch + row_bytes] for i in range(h)]
+                mask = Image.frombytes("1", (w, h), b"".join(rows)).convert("L")
+        return mask, glyph.bitmap_left, -glyph.bitmap_top, glyph.advance.x // 64
+
+    # ---- 超采样字模 ----
+    def _aa_glyph(self, ch):
+        face = self._face_aa
+        face.load_char(ch, freetype.FT_LOAD_RENDER)
+        glyph = face.glyph
+        bitmap = glyph.bitmap
+        w, h = bitmap.width, bitmap.rows
+        mask = None
+        if w > 0 and h > 0:
+            pitch = bitmap.pitch
+            data = bytes(bitmap.buffer)
+            rows = [data[i * pitch: i * pitch + w] for i in range(h)]
+            gray = Image.frombytes("L", (w, h), b"".join(rows))
+            tw = max(1, int(round(w / self.aa)))
+            th = max(1, int(round(h / self.aa)))
+            small = gray.resize((tw, th), Image.LANCZOS)
+            # 以字模峰值墨度为基准取阈值：小字号笔画细，峰值往往不到 255
+            peak = small.getextrema()[1]
+            if peak > 0:
+                cut = self.threshold * peak
+                mask = small.point(lambda v: 255 if v >= cut else 0)
+
+        left = glyph.bitmap_left / self.aa
+        top = glyph.bitmap_top / self.aa
+        advance = glyph.advance.x / 64.0 / self.aa
+        return mask, int(round(left)), -int(round(top)), advance
+
+    def _glyph(self, ch):
+        cached = self._glyphs.get(ch)
+        if cached is not None:
+            return cached
+        if len(self._glyphs) > self._MAX_GLYPHS:
+            self._glyphs.clear()
+        glyph = self._aa_glyph(ch) if self.aa else self._mono_glyph(ch)
+        self._glyphs[ch] = glyph
+        return glyph
+
     def draw_text(self, img, xy, text, fill=BLACK):
         """在 1-bit 图像上画文本"""
         x, y_baseline = xy
+        cursor = float(x)
         for ch in text:
-            self.face.load_char(ch, freetype.FT_LOAD_RENDER | freetype.FT_LOAD_TARGET_MONO)
-            bitmap = self.face.glyph.bitmap
-            w, h = bitmap.width, bitmap.rows
-            if w > 0 and h > 0:
-                # 解包 1-bit packed buffer
-                row_bytes = (w + 7) // 8
-                buf = bytes(bitmap.buffer)
-                # paste each pixel
-                bx = self.face.glyph.bitmap_left
-                by = y_baseline - self.face.glyph.bitmap_top
-                for row in range(h):
-                    for col in range(w):
-                        byte_idx = row * row_bytes + (col // 8)
-                        bit_mask = 0x80 >> (col % 8)
-                        if byte_idx < len(buf) and (buf[byte_idx] & bit_mask):
-                            px = bx + col
-                            py = by + row
-                            if 0 <= px < img.width and 0 <= py < img.height:
-                                img.putpixel((px, py), fill)
-            x += self.face.glyph.advance.x // 64
+            mask, bx, by, advance = self._glyph(ch)
+            if mask is not None:
+                px = int(round(cursor)) + bx
+                py = int(y_baseline) + by
+                x0 = max(0, px)
+                y0 = max(0, py)
+                x1 = min(img.width, px + mask.width)
+                y1 = min(img.height, py + mask.height)
+                if x1 > x0 and y1 > y0:
+                    sub = mask.crop((x0 - px, y0 - py, x1 - px, y1 - py))
+                    img.paste(fill, (x0, y0, x1, y1), sub)
+            if self.aa:
+                cursor += advance
+            else:
+                cursor += int(advance)
 
 
 # 缓存 MonoTextRenderer 实例
 _mono_cache = {}
 
-def get_mono(font_path, size_px):
-    key = (font_path, size_px)
+# 当前栅格化参数 (aa, threshold)，由 Renderer 在渲染期间设置
+_RASTER = contextvars.ContextVar("clock_raster", default=(0, 0.5))
+
+
+def set_raster(aa, threshold):
+    return _RASTER.set((int(aa or 0), float(threshold or 0.5)))
+
+
+def reset_raster(token):
+    try:
+        _RASTER.reset(token)
+    except ValueError:
+        _RASTER.set((0, 0.5))
+
+
+def get_mono(font_path, size_px, aa=0, threshold=0.5):
+    key = (font_path, size_px, aa, round(threshold, 3) if aa else 0)
     if key not in _mono_cache:
-        _mono_cache[key] = MonoTextRenderer(font_path, size_px)
+        _mono_cache[key] = MonoTextRenderer(font_path, size_px, aa=aa, threshold=threshold)
     return _mono_cache[key]
 
 
@@ -144,11 +231,13 @@ def _find_font_paths():
         (r"C:\Windows\Fonts\msyhbd.ttc",             "微软雅黑粗"),
     ]
     ch_bold_paths = [
-        ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", "文泉驿正黑"),
-        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",   "思源黑体 Bold"),
-        (r"C:\Windows\Fonts\NotoSansSC-VF.ttf",   "思源黑体"),
+        # 思源黑体 Bold（Linux 上真正的粗体，笔画明显更实）
+        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", "思源黑体 Bold"),
+        # 微软雅黑粗体
+        (r"C:\Windows\Fonts\msyhbd.ttc",             "微软雅黑粗"),
         ("/home/bullton/apps/clock/msyhbd.ttc",     "微软雅黑粗"),
-        (r"C:\Windows\Fonts\msyhbd.ttc",           "微软雅黑粗"),
+        (r"C:\Windows\Fonts\NotoSansSC-VF.ttf",      "思源黑体"),
+        ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", "文泉驿正黑"),
     ]
     emoji_paths = [
         r"C:\Windows\Fonts\seguiemj.ttf",
@@ -191,70 +280,78 @@ def _find_font_paths():
 
 _font_paths = None
 
-def load_fonts():
-    """返回各字号字体（每个字号独立创建实例）"""
-    global _font_paths
-    if _font_paths is None:
-        _font_paths = _find_font_paths()
+# 1x 基础字号（2x 版按 scale 放大）
+_FONT_SIZES = {
+    "time": 56,
+    "title": 20,
+    "title_bold": 20,
+    "body": 18,
+    "small": 16,
+    "weather": 12,
+    "tiny": 10,
+    "date": 12,
+    "tab": 12,
+    "icon": 20,
+    "icon_big": 32,
+    "wi": 20,
+    "wi_big": 36,
+}
 
+_fonts_cache = {}
+
+
+def _build_fonts(scale, weight):
     ch_path, emoji_path, time_path, ch_bold_path = _font_paths
 
     if ch_path is None:
         default = ImageFont.load_default()
-        return {k: default for k in "time title title_bold body small weather tiny date tab icon icon_big wi wi_big".split()}
+        return {k: default for k in _FONT_SIZES}
 
     wi_path = os.path.join(os.path.dirname(__file__), "weathericons-regular-webfont.ttf")
     time_font_path = time_path if time_path else (r"C:\Windows\Fonts\ariblk.ttf" if os.path.exists(r"C:\Windows\Fonts\ariblk.ttf") else ch_path)
     bold_path = ch_bold_path if ch_bold_path else ch_path
+    body_path = bold_path if weight == "bold" else ch_path
 
-    return {
-        "time":     ImageFont.truetype(time_font_path, 56),
-        "title":    ImageFont.truetype(ch_path, 20),
-        "title_bold": ImageFont.truetype(bold_path, 20),
-        "body":     ImageFont.truetype(ch_path, 18),
-        "small":    ImageFont.truetype(ch_path, 16),
-        "weather":  ImageFont.truetype(ch_path, 12),
-        "tiny":     ImageFont.truetype(ch_path, 10),
-        "date":     ImageFont.truetype(ch_path, 12),
-        "tab":      ImageFont.truetype(ch_path, 12),
-        "icon":     ImageFont.truetype(emoji_path, 20) if emoji_path else ImageFont.truetype(ch_path, 20),
-        "icon_big": ImageFont.truetype(emoji_path, 32) if emoji_path else ImageFont.truetype(ch_path, 32),
-        "wi":       ImageFont.truetype(wi_path, 20) if os.path.exists(wi_path) else None,
-        "wi_big":   ImageFont.truetype(wi_path, 36) if os.path.exists(wi_path) else None,
-    }
+    fonts = {}
+    for name, base in _FONT_SIZES.items():
+        size = base * scale
+        if name == "time":
+            fonts[name] = ImageFont.truetype(time_font_path, size)
+        elif name == "title_bold":
+            fonts[name] = ImageFont.truetype(bold_path, size)
+        elif name in ("icon", "icon_big"):
+            fonts[name] = ImageFont.truetype(emoji_path, size) if emoji_path else ImageFont.truetype(body_path, size)
+        elif name in ("wi", "wi_big"):
+            fonts[name] = ImageFont.truetype(wi_path, size) if os.path.exists(wi_path) else None
+        else:
+            fonts[name] = ImageFont.truetype(body_path, size)
+    return fonts
 
 
-def load_fonts_2x():
+def load_fonts(profile=None):
+    """返回各字号字体（1x）；profile["weight"] 决定用常规体还是粗体"""
+    global _font_paths
+    if _font_paths is None:
+        _font_paths = _find_font_paths()
+
+    weight = (profile or {}).get("weight", "regular")
+    key = (1, weight)
+    if key not in _fonts_cache:
+        _fonts_cache[key] = _build_fonts(1, weight)
+    return _fonts_cache[key]
+
+
+def load_fonts_2x(profile=None):
     """返回 2x 分辨率字体（字号翻倍）"""
     global _font_paths
     if _font_paths is None:
         _font_paths = _find_font_paths()
 
-    ch_path, emoji_path, time_path, ch_bold_path = _font_paths
-
-    if ch_path is None:
-        default = ImageFont.load_default()
-        return {k: default for k in "time title title_bold body small weather tiny date tab icon icon_big wi wi_big".split()}
-
-    wi_path = os.path.join(os.path.dirname(__file__), "weathericons-regular-webfont.ttf")
-    time_font_path = time_path if time_path else (r"C:\Windows\Fonts\ariblk.ttf" if os.path.exists(r"C:\Windows\Fonts\ariblk.ttf") else ch_path)
-    bold_path = ch_bold_path if ch_bold_path else ch_path
-
-    return {
-        "time":     ImageFont.truetype(time_font_path, 112),
-        "title":    ImageFont.truetype(ch_path, 40),
-        "title_bold": ImageFont.truetype(bold_path, 40),
-        "body":     ImageFont.truetype(ch_path, 36),
-        "small":    ImageFont.truetype(ch_path, 32),
-        "weather":  ImageFont.truetype(ch_path, 24),
-        "tiny":     ImageFont.truetype(ch_path, 20),
-        "date":     ImageFont.truetype(ch_path, 24),
-        "tab":      ImageFont.truetype(ch_path, 24),
-        "icon":     ImageFont.truetype(emoji_path, 40) if emoji_path else ImageFont.truetype(ch_path, 40),
-        "icon_big": ImageFont.truetype(emoji_path, 64) if emoji_path else ImageFont.truetype(ch_path, 64),
-        "wi":       ImageFont.truetype(wi_path, 40) if os.path.exists(wi_path) else None,
-        "wi_big":   ImageFont.truetype(wi_path, 72) if os.path.exists(wi_path) else None,
-    }
+    weight = (profile or {}).get("weight", "regular")
+    key = (2, weight)
+    if key not in _fonts_cache:
+        _fonts_cache[key] = _build_fonts(2, weight)
+    return _fonts_cache[key]
 
 
 # ============================================================
@@ -476,8 +573,9 @@ class Layout2x:
 # ============================================================
 
 class Renderer2x:
-    def __init__(self):
-        self.fonts = load_fonts_2x()
+    def __init__(self, profile=None):
+        self.profile = profile or {}
+        self.fonts = load_fonts_2x(self.profile)
         self.L = Layout2x()
 
     def _text_size(self, text, font):
@@ -939,7 +1037,12 @@ class Renderer2x:
         if data is None:
             import data as _data
             data = _data.collect()
-        img = self.draw(data)
+        # 2x 路径靠缩小时的抗锯齿，字模本身保持单色
+        token = set_raster(0, 0.5)
+        try:
+            img = self.draw(data)
+        finally:
+            reset_raster(token)
         return img
 
 
@@ -948,8 +1051,9 @@ class Renderer2x:
 # ============================================================
 
 class Renderer:
-    def __init__(self):
-        self.fonts = load_fonts()
+    def __init__(self, profile=None):
+        self.profile = profile or {}
+        self.fonts = load_fonts(self.profile)
         self.L = Layout()
 
     def _text_size(self, text, font):
@@ -1430,7 +1534,11 @@ class Renderer:
         if data is None:
             import data as _data
             data = _data.collect()
-        img = self.draw(data)
+        token = set_raster(self.profile.get("aa", 0), self.profile.get("threshold", 0.5))
+        try:
+            img = self.draw(data)
+        finally:
+            reset_raster(token)
         return img, img.convert("L")
 
 
@@ -1438,32 +1546,39 @@ class Renderer:
 # 全局便捷函数
 # ============================================================
 
-_renderer = None
-
-def render(data=None):
-    """返回 (img_1bit, img_800_raw) 元组"""
-    global _renderer
-    if _renderer is None:
-        _renderer = Renderer()
-    return _renderer.render(data)
+_renderer_cache = {}
 
 
-def render_raw(data=None):
+def get_renderer(profile=None):
+    """按方案缓存 Renderer 实例（方案切换后无需重建字体）"""
+    profile = profile or {}
+    key = (profile.get("id") or "classic", profile.get("weight", "regular"),
+           int(profile.get("aa", 0)), round(float(profile.get("threshold", 0.5)), 3))
+    renderer = _renderer_cache.get(key)
+    if renderer is None:
+        renderer = Renderer(profile)
+        _renderer_cache[key] = renderer
+    return renderer
+
+
+def render(data=None, profile=None):
+    """返回 (img_1bit, img_gray) 元组"""
+    return get_renderer(profile).render(data)
+
+
+def render_raw(data=None, profile=None):
     """只返回 400x300 灰度原图"""
-    global _renderer
-    if _renderer is None:
-        _renderer = Renderer()
-    _, img_hi = _renderer.render(data)
+    _, img_hi = get_renderer(profile).render(data)
     return img_hi
 
 
-def render_hires(data=None):
+def render_hires(data=None, profile=None):
     """2x 超采样：先在 800x600 渲染灰度，再缩到 400x300 并二值化"""
     if data is None:
         import data as _data
         data = _data.collect()
 
-    r = Renderer2x()
+    r = Renderer2x(profile)
     img_big = r.render(data)
 
     # 缩到 400x300：LANCZOS 平滑

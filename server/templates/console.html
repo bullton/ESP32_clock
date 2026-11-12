@@ -195,6 +195,24 @@
         </div>
       </div>
 
+      <article class="card">
+        <div class="card-head">
+          <h2>字体方案</h2>
+          <span class="badge" id="style-current">读取中</span>
+        </div>
+        <p class="card-note">点一张卡片即可切换，设备在下一次刷新时换成新画面。缩略图用的是当前实时数据。</p>
+        <div class="style-grid" id="style-grid"></div>
+        <div class="style-tuning" id="style-tuning" hidden>
+          <label for="style-threshold">
+            <span>笔画粗细</span>
+            <span id="style-threshold-val">0.33</span>
+          </label>
+          <input type="range" id="style-threshold" min="26" max="46" step="1" value="33">
+          <p class="field-hint">数值越小笔画越粗（26 最粗，46 最细），只对「平滑」类方案生效。</p>
+        </div>
+        <p class="field-hint" id="style-msg"></p>
+      </article>
+
       <div class="card">
         <dl class="inline-stats">
           <div><dt>上次刷新</dt><dd id="scr-updated">—</dd></div>
@@ -320,6 +338,8 @@
               <tr><td><code>/api/time</code></td><td><span class="badge badge-open">公开</span></td></tr>
               <tr><td><code>/api/info</code></td><td><span class="badge badge-lock">需登录</span></td></tr>
               <tr><td><code>/api/bottom_content</code></td><td><span class="badge badge-lock">需登录</span></td></tr>
+              <tr><td><code>/api/console/styles</code></td><td><span class="badge badge-lock">需登录</span></td></tr>
+              <tr><td><code>/api/console/style_preview</code></td><td><span class="badge badge-lock">需登录</span></td></tr>
               <tr><td><code>/api/debug/layout</code></td><td><span class="badge badge-lock">需登录</span></td></tr>
             </tbody>
           </table>
