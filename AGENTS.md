@@ -72,16 +72,22 @@ def current_weather():
 ## 部署命令
 
 ```bash
-# 上传文件
-scp -i ~/.ssh/id_rsa_bullton_180_nopass <local_file> bullton@192.168.50.180:/home/bullton/clock_server/
+# 推荐流程：先 push 到 origin/master，再在服务器上拉取并执行 deploy.sh
+git push origin master
+ssh -i ~/.ssh/id_rsa_bullton_180_nopass bullton@192.168.50.180 "cd /home/bullton/clock_server && git pull --ff-only origin master && bash deploy.sh"
 
-# 重启服务（注意 nohup 后台运行）
-ssh -i ~/.ssh/id_rsa_bullton_180_nopass bullton@192.168.50.180 "pkill -f 'python3 app.py'; sleep 1; cd /home/bullton/clock_server && rm -rf __pycache__ && nohup python3 app.py > server.log 2>&1 &"
+# 单独上传单个文件
+scp -i ~/.ssh/id_rsa_bullton_180_nopass <local_file> bullton@192.168.50.180:/home/bullton/clock_server/server/
 
 # 测试
 curl.exe -s "http://192.168.50.180:5000/api/screen.png?env_temp=25.5" -w "%{http_code}"
 curl.exe -s "http://192.168.50.180:5000/api/screen_2x" -o test.bin  # 应为 15000 字节
 ```
+
+**重要**：服务由 **PM2** 托管（`pm2 list` 里的 `clock_server`，cwd `/home/bullton/clock_server`，`python3 app.py`）。
+**不要** `pkill -f 'python3 app.py'`——进程被杀后 PM2 会立刻拉起新实例，和手动 `nohup` 启动的实例抢 5000 端口，
+日志里会出现 `Address already in use`。重启请用 `pm2 restart clock_server`（`deploy.sh` 已内置）。
+PM2 日志在 `~/.pm2/logs/clock-server-{out,error}.log`，`server.log` 只是历史遗留。
 
 ## API 端点
 
